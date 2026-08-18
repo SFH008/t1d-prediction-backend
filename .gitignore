@@ -260,3 +260,14 @@ htmlcov/
 .mypy_cache/
 .env
 test.db
+
+# T1D App specific
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.env
+test.db
