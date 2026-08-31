@@ -1,0 +1,38 @@
+# FastAPI & Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# Database - SQLAlchemy ORM with async PostgreSQL
+sqlalchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+
+
+# Async PostgreSQL driver
+asyncpg>=0.30,<1
+
+# Data Validation & Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+
+# Environment & Config
+python-dotenv==1.0.0
+
+# Logging
+python-json-logger==2.0.7
+
+# Testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.1
+pytest-cov>=4.0.0
+
+# Development (optional)
+black==23.11.0
+flake8==6.1.0
+isort==5.12.0
+
+pandas>=2.0.0
+numpy>=1.24.0
