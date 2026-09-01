@@ -1,529 +1,556 @@
 """
-Phase 3a: Training Dataset Builder
+Tests for the Phase 3a TrainingDatasetBuilder.
 
-Extracts patient data from PostgreSQL and aligns records chronologically.
-
-Handles:
-- Multi-table joins (glucose, insulin, carbs, activity, hormonal contexts)
-- 5-minute resampling
-- Gap detection (CGM sensor issues)
-- Timezone handling (UTC-aware)
-- Null/missing value handling
+These tests target the production implementation in:
+    app.ml.layer1.training_dataset_builder
 """
 
-from datetime import datetime, timedelta
-from typing import Tuple, List, Optional
-import logging
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pandas as pd
-import numpy as np
-import psycopg2
-from psycopg2.extras import DictCursor
+import pytest
 
-from app.ml.layer1.phase3_types import DataGap, DataQualityMetrics, ValidationResult
-
-
-logger = logging.getLogger(__name__)
+from app.ml.layer1.phase3_types import DataGap, DataQualityMetrics
+from app.ml.layer1.training_dataset_builder import TrainingDatasetBuilder
 
 
-class TrainingDatasetBuilder:
-    """
-    Extract raw training data from PostgreSQL and prepare for model training.
+@pytest.fixture
+def builder():
+    """Create a builder without opening a real database connection."""
+    instance = object.__new__(TrainingDatasetBuilder)
+    instance.db_connection_string = "postgresql+asyncpg://test:test@localhost/test"
+    instance.engine = None
+    instance._owns_engine = False
+    return instance
 
-    The dataset contains:
-    - Glucose readings (CGM or fingerstick meter)
-    - Insulin events (bolus and basal)
-    - Carbohydrate intakes
-    - Activity events
-    - Hormonal contexts
-    - Therapy limits
 
-    All data is aligned to a common 5-minute timeline.
-    """
+def test_init_rejects_empty_connection_string():
+    with pytest.raises(ValueError, match="cannot be empty"):
+        TrainingDatasetBuilder("")
 
-    # Constants
-    RESAMPLE_INTERVAL = '5T'  # 5-minute intervals
-    MAX_GAP_MINUTES = 30  # Gaps > 30 min considered sensor error
 
-    def __init__(self, db_connection_string: str):
-        """
-        Initialize dataset builder with database connection.
+def test_merge_datasets_preserves_all_timestamps():
+    glucose = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            ["2026-01-01 00:00:00+00:00"],
+            utc=True,
+        ),
+        "glucose_mg_dl": [120],
+        "glucose_source": ["CGM"],
+    })
 
-        Args:
-            db_connection_string: psycopg2 connection string
-                e.g., "postgresql://user:pass@localhost:5432/glucose_db"
-        """
-        self.db_connection_string = db_connection_string
-        self.conn = None
-        self._connect()
+    insulin = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            ["2026-01-01 00:05:00+00:00"],
+            utc=True,
+        ),
+        "insulin_bolus_units": [2.0],
+        "insulin_basal_units": [None],
+    })
 
-    def _connect(self):
-        """Establish database connection."""
-        try:
-            self.conn = psycopg2.connect(self.db_connection_string)
-            logger.info("Connected to PostgreSQL database")
-        except psycopg2.Error as e:
-            logger.error(f"Database connection failed: {e}")
-            raise
+    empty = pd.DataFrame()
 
-    def close(self):
-        """Close database connection."""
-        if self.conn:
-            self.conn.close()
-            logger.info("Database connection closed")
+    result = TrainingDatasetBuilder._merge_datasets(
+        glucose,
+        insulin,
+        empty,
+        empty,
+        empty,
+        empty,
+    )
 
-    def extract_patient_data(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """
-        Extract all relevant data for a patient over a time range.
-
-        Args:
-            patient_id: UUID of patient
-            start_date: Start of time range (inclusive, UTC)
-            end_date: End of time range (inclusive, UTC)
-
-        Returns:
-            DataFrame with columns:
-            - timestamp (sorted, 5-min intervals, UTC-aware)
-            - glucose_mg_dl (forward-filled)
-            - glucose_source (CGM or Meter)
-            - insulin_bolus_units (sparse, event-based)
-            - insulin_basal_units (forward-filled)
-            - carb_intake_grams (sparse, event-based)
-            - activity_intensity (sparse)
-            - activity_duration_min (sparse)
-            - hormone_type (sparse)
-            - hormone_context (sparse)
-            - therapy_limit_type (sparse)
-
-        Raises:
-            psycopg2.Error: If query fails
-            ValueError: If patient_id not found
-        """
-        logger.info(
-            f"Extracting data for patient {patient_id} "
-            f"from {start_date} to {end_date}"
+    assert len(result) == 2
+    assert list(result["timestamp"]) == list(
+        pd.to_datetime(
+            [
+                "2026-01-01 00:00:00+00:00",
+                "2026-01-01 00:05:00+00:00",
+            ],
+            utc=True,
         )
+    )
 
-        # Verify patient exists
-        if not self._patient_exists(patient_id):
-            raise ValueError(f"Patient {patient_id} not found")
 
-        # Extract each table
-        glucose_df = self._extract_glucose(patient_id, start_date, end_date)
-        insulin_df = self._extract_insulin(patient_id, start_date, end_date)
-        carbs_df = self._extract_carbs(patient_id, start_date, end_date)
-        activity_df = self._extract_activity(patient_id, start_date, end_date)
-        hormonal_df = self._extract_hormonal(patient_id, start_date, end_date)
-        therapy_df = self._extract_therapy_limits(patient_id, start_date, end_date)
+def test_merge_datasets_keeps_therapy_limits_as_metadata():
+    glucose = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            ["2026-01-01 00:00:00+00:00"],
+            utc=True,
+        ),
+        "glucose_mg_dl": [120],
+        "glucose_source": ["CGM"],
+    })
 
-        # Merge on timestamp
-        df = self._merge_datasets(
-            glucose_df, insulin_df, carbs_df, activity_df, hormonal_df, therapy_df
+    therapy = pd.DataFrame({
+        "therapy_limit_type": ["glucose_target"],
+        "therapy_lower_bound": [80],
+        "therapy_upper_bound": [120],
+    })
+
+    result = TrainingDatasetBuilder._merge_datasets(
+        glucose,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        therapy,
+    )
+
+    assert "therapy_limit_type" not in result.columns
+    assert result.attrs["therapy_limits"] == [
+        {
+            "therapy_limit_type": "glucose_target",
+            "therapy_lower_bound": 80,
+            "therapy_upper_bound": 120,
+        }
+    ]
+
+
+def test_merge_datasets_has_empty_therapy_metadata_when_no_limits():
+    glucose = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            ["2026-01-01 00:00:00+00:00"],
+            utc=True,
+        ),
+        "glucose_mg_dl": [120],
+    })
+
+    result = TrainingDatasetBuilder._merge_datasets(
+        glucose,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+    )
+
+    assert result.attrs["therapy_limits"] == []
+
+
+def test_resample_sums_events_within_five_minutes():
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            [
+                "2026-01-01 00:01:00+00:00",
+                "2026-01-01 00:04:00+00:00",
+            ],
+            utc=True,
+        ),
+        "glucose_mg_dl": [100, 105],
+        "insulin_bolus_units": [1.0, 2.0],
+        "insulin_basal_units": [0.1, 0.2],
+        "carb_intake_grams": [10.0, 20.0],
+    })
+
+    result = TrainingDatasetBuilder._resample_to_5min(df)
+
+    assert len(result) == 1
+    assert result.loc[0, "insulin_bolus_units"] == pytest.approx(3.0)
+    assert result.loc[0, "insulin_basal_units"] == pytest.approx(0.3)
+    assert result.loc[0, "carb_intake_grams"] == pytest.approx(30.0)
+    assert result.loc[0, "glucose_mg_dl"] == 100
+
+
+def test_resample_preserves_first_scalar_value():
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            [
+                "2026-01-01 00:01:00+00:00",
+                "2026-01-01 00:04:00+00:00",
+            ],
+            utc=True,
+        ),
+        "glucose_mg_dl": [100, 105],
+        "glucose_source": ["CGM", "Meter"],
+    })
+
+    result = TrainingDatasetBuilder._resample_to_5min(df)
+
+    assert result.loc[0, "glucose_mg_dl"] == 100
+    assert result.loc[0, "glucose_source"] == "CGM"
+
+
+def test_forward_fill_scalars_only():
+    df = pd.DataFrame({
+        "timestamp": pd.date_range(
+            "2026-01-01",
+            periods=3,
+            freq="5min",
+            tz="UTC",
+        ),
+        "glucose_mg_dl": [100, None, None],
+        "glucose_source": ["CGM", None, None],
+        "insulin_basal_units": [0.5, None, None],
+        "insulin_bolus_units": [1.0, None, None],
+        "carb_intake_grams": [20.0, None, None],
+    })
+
+    result = TrainingDatasetBuilder._forward_fill_scalars(df)
+
+    assert result["glucose_mg_dl"].tolist() == [100, 100, 100]
+    assert result["glucose_source"].tolist() == ["CGM", "CGM", "CGM"]
+    assert result["insulin_basal_units"].tolist() == [0.5, 0.5, 0.5]
+
+    assert pd.isna(result.loc[1, "insulin_bolus_units"])
+    assert pd.isna(result.loc[2, "insulin_bolus_units"])
+    assert pd.isna(result.loc[1, "carb_intake_grams"])
+    assert pd.isna(result.loc[2, "carb_intake_grams"])
+
+
+def test_detect_gaps_finds_gap_over_threshold(builder):
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            [
+                "2026-01-01 00:00:00+00:00",
+                "2026-01-01 00:05:00+00:00",
+                "2026-01-01 00:40:00+00:00",
+            ],
+            utc=True,
+        ),
+        "glucose_mg_dl": [100, None, 110],
+    })
+
+    gaps = builder.detect_gaps(df)
+
+    assert len(gaps) == 1
+    assert isinstance(gaps[0], DataGap)
+    assert gaps[0].duration_minutes == pytest.approx(35.0)
+    assert gaps[0].gap_reason == "unknown"
+
+
+def test_detect_gaps_ignores_gap_at_or_below_threshold(builder):
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            [
+                "2026-01-01 00:00:00+00:00",
+                "2026-01-01 00:35:00+00:00",
+            ],
+            utc=True,
+        ),
+        "glucose_mg_dl": [100, 110],
+    })
+
+    gaps = builder.detect_gaps(df)
+
+    assert gaps == []
+
+
+def test_detect_gaps_handles_end_of_data(builder):
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            [
+                "2026-01-01 00:00:00+00:00",
+                "2026-01-01 00:05:00+00:00",
+                "2026-01-01 00:40:00+00:00",
+                "2026-01-01 01:15:00+00:00",
+            ],
+            utc=True,
+        ),
+        "glucose_mg_dl": [100, 110, None, None],
+    })
+
+    gaps = builder.detect_gaps(df)
+
+    assert len(gaps) == 1
+    assert gaps[0].gap_reason == "end_of_data"
+    assert gaps[0].duration_minutes == pytest.approx(35.0)
+
+
+def test_detect_gaps_empty_dataframe(builder):
+    gaps = builder.detect_gaps(pd.DataFrame())
+
+    assert gaps == []
+
+
+def test_detect_gaps_without_glucose_column(builder):
+    df = pd.DataFrame({
+        "timestamp": pd.date_range(
+            "2026-01-01",
+            periods=3,
+            freq="5min",
+            tz="UTC",
         )
+    })
 
-        # Resample to 5-minute intervals
-        df = self._resample_to_5min(df)
+    assert builder.detect_gaps(df) == []
 
-        # Forward-fill scalar values (keep event columns sparse)
-        df = self._forward_fill_scalars(df)
 
-        logger.info(f"Extracted {len(df)} records for patient {patient_id}")
+def test_compute_quality_metrics(builder):
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(
+            [
+                "2026-01-01 00:00:00+00:00",
+                "2026-01-01 00:05:00+00:00",
+                "2026-01-01 00:10:00+00:00",
+            ],
+            utc=True,
+        ),
+        "glucose_mg_dl": [100, None, 450],
+        "insulin_bolus_units": [1.0, None, 101.0],
+        "carb_intake_grams": [20.0, None, 30.0],
+    })
 
-        return df
+    metrics = builder.compute_quality_metrics(df)
 
-    def _patient_exists(self, patient_id: str) -> bool:
-        """Check if patient exists in database."""
-        query = "SELECT 1 FROM patients WHERE patient_id = %s"
-        with self.conn.cursor() as cur:
-            cur.execute(query, (patient_id,))
-            return cur.fetchone() is not None
+    assert isinstance(metrics, DataQualityMetrics)
+    assert metrics.total_samples == 3
+    assert metrics.missing_glucose_count == 1
+    assert metrics.missing_insulin_count == 1
+    assert metrics.missing_carbs_count == 1
+    assert metrics.glucose_outlier_count == 1
+    assert metrics.insulin_outlier_count == 1
+    assert metrics.duplicate_timestamp_count == 0
 
-    def _extract_glucose(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """Extract glucose readings."""
-        query = """
-        SELECT
-            timestamp,
-            glucose_mg_dl,
-            source
-        FROM glucose_readings
-        WHERE patient_id = %s
-            AND timestamp BETWEEN %s AND %s
-        ORDER BY timestamp ASC
-        """
 
-        df = pd.read_sql(
-            query,
-            self.conn,
-            params=(patient_id, start_date, end_date),
-            parse_dates=['timestamp'],
-        )
+def test_compute_quality_metrics_counts_duplicate_timestamps(builder):
+    timestamp = pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
 
-        # Rename for clarity
-        df = df.rename(columns={'source': 'glucose_source'})
+    df = pd.DataFrame({
+        "timestamp": [timestamp, timestamp],
+        "glucose_mg_dl": [100, 110],
+        "insulin_bolus_units": [None, None],
+        "carb_intake_grams": [None, None],
+    })
 
-        logger.info(f"  Extracted {len(df)} glucose readings")
-        return df
+    metrics = builder.compute_quality_metrics(df)
 
-    def _extract_insulin(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """Extract insulin events (bolus and basal)."""
-        query = """
-        SELECT
-            timestamp,
-            CASE
-                WHEN type = 'BOLUS' THEN units
-                ELSE NULL
-            END AS insulin_bolus_units,
-            CASE
-                WHEN type = 'BASAL' THEN units
-                ELSE NULL
-            END AS insulin_basal_units
-        FROM insulin_events
-        WHERE patient_id = %s
-            AND timestamp BETWEEN %s AND %s
-        ORDER BY timestamp ASC
-        """
+    assert metrics.total_samples == 2
+    assert metrics.duplicate_timestamp_count == 1
 
-        df = pd.read_sql(
-            query,
-            self.conn,
-            params=(patient_id, start_date, end_date),
-            parse_dates=['timestamp'],
-        )
 
-        logger.info(f"  Extracted {len(df)} insulin events")
-        return df
+def test_compute_quality_metrics_empty(builder):
+    metrics = builder.compute_quality_metrics(pd.DataFrame())
 
-    def _extract_carbs(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """Extract carbohydrate intake events."""
-        query = """
-        SELECT
-            timestamp,
-            carbs_grams
-        FROM carb_intakes
-        WHERE patient_id = %s
-            AND timestamp BETWEEN %s AND %s
-        ORDER BY timestamp ASC
-        """
+    assert metrics.total_samples == 0
+    assert metrics.missing_glucose_count == 0
+    assert metrics.gaps == []
 
-        df = pd.read_sql(
-            query,
-            self.conn,
-            params=(patient_id, start_date, end_date),
-            parse_dates=['timestamp'],
-        )
 
-        df = df.rename(columns={'carbs_grams': 'carb_intake_grams'})
+@pytest.mark.asyncio
+async def test_patient_exists_uses_external_patient_id(builder):
+    builder._fetch_all = AsyncMock(return_value=[{"?column?": 1}])
 
-        logger.info(f"  Extracted {len(df)} carb intake events")
-        return df
+    result = await builder._patient_exists("patient-123")
 
-    def _extract_activity(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """Extract activity events."""
-        query = """
-        SELECT
-            timestamp,
-            intensity,
-            duration_minutes
-        FROM activities
-        WHERE patient_id = %s
-            AND timestamp BETWEEN %s AND %s
-        ORDER BY timestamp ASC
-        """
+    assert result is True
+    builder._fetch_all.assert_awaited_once()
 
-        df = pd.read_sql(
-            query,
-            self.conn,
-            params=(patient_id, start_date, end_date),
-            parse_dates=['timestamp'],
-        )
 
-        df = df.rename(columns={
-            'intensity': 'activity_intensity',
-            'duration_minutes': 'activity_duration_min',
-        })
+@pytest.mark.asyncio
+async def test_patient_exists_returns_false_when_missing(builder):
+    builder._fetch_all = AsyncMock(return_value=[])
 
-        logger.info(f"  Extracted {len(df)} activity events")
-        return df
+    result = await builder._patient_exists("missing")
 
-    def _extract_hormonal(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """Extract hormonal context (period, stress, illness, etc.)."""
-        query = """
-        SELECT
-            timestamp,
-            hormone_type,
-            context
-        FROM hormonal_contexts
-        WHERE patient_id = %s
-            AND timestamp BETWEEN %s AND %s
-        ORDER BY timestamp ASC
-        """
+    assert result is False
 
-        df = pd.read_sql(
-            query,
-            self.conn,
-            params=(patient_id, start_date, end_date),
-            parse_dates=['timestamp'],
-        )
 
-        df = df.rename(columns={
-            'hormone_type': 'hormone_type',
-            'context': 'hormone_context',
-        })
+@pytest.mark.asyncio
+async def test_resolve_patient_db_id(builder):
+    builder._fetch_all = AsyncMock(
+        return_value=[{"id": "11111111-1111-1111-1111-111111111111"}]
+    )
 
-        logger.info(f"  Extracted {len(df)} hormonal context records")
-        return df
+    result = await builder._resolve_patient_db_id("external-123")
 
-    def _extract_therapy_limits(
-        self,
-        patient_id: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> pd.DataFrame:
-        """Extract therapy limits (ISF, ICR, targets, etc.)."""
-        query = """
-        SELECT
-            timestamp,
-            limit_type
-        FROM therapy_limits
-        WHERE patient_id = %s
-            AND timestamp BETWEEN %s AND %s
-        ORDER BY timestamp ASC
-        """
+    assert result == "11111111-1111-1111-1111-111111111111"
 
-        df = pd.read_sql(
-            query,
-            self.conn,
-            params=(patient_id, start_date, end_date),
-            parse_dates=['timestamp'],
-        )
 
-        df = df.rename(columns={'limit_type': 'therapy_limit_type'})
+@pytest.mark.asyncio
+async def test_resolve_patient_db_id_raises_for_missing_patient(builder):
+    builder._fetch_all = AsyncMock(return_value=[])
 
-        logger.info(f"  Extracted {len(df)} therapy limit records")
-        return df
+    with pytest.raises(ValueError, match="external_patient_id='missing'"):
+        await builder._resolve_patient_db_id("missing")
 
-    @staticmethod
-    def _merge_datasets(
-        glucose_df: pd.DataFrame,
-        insulin_df: pd.DataFrame,
-        carbs_df: pd.DataFrame,
-        activity_df: pd.DataFrame,
-        hormonal_df: pd.DataFrame,
-        therapy_df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Merge all extracted dataframes on timestamp.
 
-        Uses outer merge to preserve all timestamps from all tables.
-        """
-        # Start with glucose (typically the most frequent)
-        df = glucose_df.copy()
-
-        # Merge in order (outer join on timestamp)
-        for other_df, name in [
-            (insulin_df, 'insulin'),
-            (carbs_df, 'carbs'),
-            (activity_df, 'activity'),
-            (hormonal_df, 'hormonal'),
-            (therapy_df, 'therapy'),
-        ]:
-            if len(other_df) > 0:
-                df = pd.merge(df, other_df, on='timestamp', how='outer')
-
-            logger.debug(f"  Merged {name}: {len(df)} total records")
-
-        # Sort by timestamp
-        df = df.sort_values('timestamp').reset_index(drop=True)
-
-        return df
-
-    @staticmethod
-    def _resample_to_5min(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Resample data to 5-minute intervals.
-
-        - Sets timestamp as index
-        - Resamples to 5T (5-minute) frequency
-        - Uses 'first' aggregation (first non-null value in each interval)
-        - Resets index to make timestamp a column again
-        """
-        df = df.copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-        df.set_index('timestamp', inplace=True)
-
-        # Resample: use 'first' to get first non-null value in each 5-min window
-        df = df.resample('5T').first()
-
-        df.reset_index(inplace=True)
-
-        return df
-
-    @staticmethod
-    def _forward_fill_scalars(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Forward-fill scalar values (e.g., glucose, basal insulin).
-
-        Sparse event columns (bolus, carbs, activity) are left as-is (not forward-filled).
-
-        Scalars that carry over from previous readings:
-        - glucose_mg_dl (scalar measurement)
-        - glucose_source (scalar measurement)
-        - insulin_basal_units (scalar rate)
-
-        Events that should NOT be forward-filled:
-        - insulin_bolus_units (event: only occurs at time of injection)
-        - carb_intake_grams (event: only at time of meal)
-        - activity_* (event: only at start of activity)
-        - hormone_* (event: context-dependent)
-        - therapy_limit_type (event: when changed)
-        """
-        df = df.copy()
-
-        scalar_columns = [
-            'glucose_mg_dl',
-            'glucose_source',
-            'insulin_basal_units',
+@pytest.mark.asyncio
+async def test_extract_therapy_limits_uses_configuration_without_timestamp(
+    builder,
+):
+    builder._fetch_all = AsyncMock(
+        return_value=[
+            {
+                "limit_type": "glucose_target",
+                "lower_bound": 80,
+                "upper_bound": 120,
+                "is_hard_limit": True,
+                "time_of_day_start": None,
+                "time_of_day_end": None,
+                "day_of_week": None,
+            }
         ]
+    )
 
-        for col in scalar_columns:
-            if col in df.columns:
-                df[col] = df[col].fillna(method='ffill')
+    result = await builder._extract_therapy_limits("internal-id")
 
-        return df
+    assert list(result.columns) == [
+        "therapy_limit_type",
+        "therapy_lower_bound",
+        "therapy_upper_bound",
+    ]
 
-    def detect_gaps(
-        self,
-        df: pd.DataFrame,
-        max_gap_minutes: int = MAX_GAP_MINUTES,
-    ) -> List[DataGap]:
-        """
-        Detect gaps in CGM data (e.g., sensor restart, signal loss).
+    assert result.iloc[0]["therapy_limit_type"] == "glucose_target"
+    assert result.iloc[0]["therapy_lower_bound"] == 80
+    assert result.iloc[0]["therapy_upper_bound"] == 120
 
-        A gap is a period where glucose readings are missing for > max_gap_minutes.
+    builder._fetch_all.assert_awaited_once()
 
-        Args:
-            df: DataFrame from extract_patient_data()
-            max_gap_minutes: Threshold for gap detection (default 30 min)
 
-        Returns:
-            List of DataGap objects with start, end, and duration
-        """
-        df = df.copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+@pytest.mark.asyncio
+async def test_extract_therapy_limits_returns_empty_schema(builder):
+    builder._fetch_all = AsyncMock(return_value=[])
 
-        # Find where glucose is present
-        has_glucose = df['glucose_mg_dl'].notna()
+    result = await builder._extract_therapy_limits("internal-id")
 
-        gaps = []
-        gap_start = None
+    assert result.empty
+    assert list(result.columns) == [
+        "therapy_limit_type",
+        "therapy_lower_bound",
+        "therapy_upper_bound",
+    ]
 
-        for i, (idx, row) in enumerate(df.iterrows()):
-            if not has_glucose.iloc[i]:  # No glucose
-                if gap_start is None:
-                    gap_start = i
-            else:  # Has glucose
-                if gap_start is not None:
-                    gap_start_time = df.iloc[gap_start]['timestamp']
-                    gap_end_time = row['timestamp']
-                    duration_minutes = (gap_end_time - gap_start_time).total_seconds() / 60
 
-                    if duration_minutes > max_gap_minutes:
-                        gaps.append(DataGap(
-                            start_time=gap_start_time,
-                            end_time=gap_end_time,
-                            duration_minutes=duration_minutes,
-                            gap_reason='unknown',
-                        ))
+@pytest.mark.asyncio
+async def test_extract_glucose_maps_database_columns(builder):
+    builder._fetch_all = AsyncMock(
+        return_value=[
+            {
+                "timestamp": datetime(
+                    2026,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                ),
+                "glucose_mg_dl": 120,
+                "glucose_source": "CGM",
+            }
+        ]
+    )
 
-                    gap_start = None
+    result = await builder._extract_glucose(
+        "internal-id",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
 
-        # Handle gap at end of dataset
-        if gap_start is not None:
-            gap_start_time = df.iloc[gap_start]['timestamp']
-            gap_end_time = df.iloc[-1]['timestamp']
-            duration_minutes = (gap_end_time - gap_start_time).total_seconds() / 60
+    assert list(result.columns) == [
+        "timestamp",
+        "glucose_mg_dl",
+        "glucose_source",
+    ]
+    assert result.iloc[0]["glucose_mg_dl"] == 120
+    assert result.iloc[0]["glucose_source"] == "CGM"
 
-            if duration_minutes > max_gap_minutes:
-                gaps.append(DataGap(
-                    start_time=gap_start_time,
-                    end_time=gap_end_time,
-                    duration_minutes=duration_minutes,
-                    gap_reason='end_of_data',
-                ))
 
-        logger.info(f"Detected {len(gaps)} gaps > {max_gap_minutes} minutes")
-        for gap in gaps:
-            logger.debug(f"  {gap}")
+@pytest.mark.asyncio
+async def test_extract_insulin_maps_database_columns(builder):
+    builder._fetch_all = AsyncMock(
+        return_value=[
+            {
+                "timestamp": datetime(
+                    2026,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                ),
+                "insulin_bolus_units": 2.5,
+                "insulin_basal_units": None,
+                "basal_rate": 0.5,
+            }
+        ]
+    )
 
-        return gaps
+    result = await builder._extract_insulin(
+        "internal-id",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
 
-    def compute_quality_metrics(self, df: pd.DataFrame) -> DataQualityMetrics:
-        """
-        Compute data quality metrics for the dataset.
+    assert list(result.columns) == [
+        "timestamp",
+        "insulin_bolus_units",
+        "insulin_basal_units",
+    ]
+    assert result.iloc[0]["insulin_bolus_units"] == 2.5
+    assert result.iloc[0]["insulin_basal_units"] == 0.5
 
-        Args:
-            df: DataFrame from extract_patient_data()
 
-        Returns:
-            DataQualityMetrics with counts and fractions
-        """
-        metrics = DataQualityMetrics()
-        metrics.total_samples = len(df)
+@pytest.mark.asyncio
+async def test_extract_hormonal_maps_actual_database_columns(builder):
+    builder._fetch_all = AsyncMock(
+        return_value=[
+            {
+                "timestamp": datetime(
+                    2026,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                ),
+                "hormone_type": "stress",
+                "hormone_context": "high",
+            }
+        ]
+    )
 
-        # Count missing values
-        metrics.missing_glucose_count = df['glucose_mg_dl'].isna().sum()
-        metrics.missing_insulin_count = df['insulin_bolus_units'].isna().sum()
-        metrics.missing_carbs_count = df['carb_intake_grams'].isna().sum()
+    result = await builder._extract_hormonal(
+        "internal-id",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
 
-        # Count outliers (outside hard constraints)
-        if 'glucose_mg_dl' in df.columns:
-            metrics.glucose_outlier_count = (
-                ((df['glucose_mg_dl'] < 40) | (df['glucose_mg_dl'] > 400))
-                .sum()
-            )
+    assert result.iloc[0]["hormone_type"] == "stress"
+    assert result.iloc[0]["hormone_context"] == "high"
 
-        if 'insulin_bolus_units' in df.columns:
-            metrics.insulin_outlier_count = (
-                ((df['insulin_bolus_units'] < 0) | (df['insulin_bolus_units'] > 100))
-                .sum()
-            )
 
-        # Count duplicates
-        metrics.duplicate_timestamp_count = df['timestamp'].duplicated().sum()
+@pytest.mark.asyncio
+async def test_extract_carbs_maps_database_columns(builder):
+    builder._fetch_all = AsyncMock(
+        return_value=[
+            {
+                "timestamp": datetime(
+                    2026,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                ),
+                "carb_intake_grams": 45,
+            }
+        ]
+    )
 
-        # Detect gaps
-        metrics.gaps = self.detect_gaps(df)
+    result = await builder._extract_carbs(
+        "internal-id",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
 
-        logger.info(f"Quality metrics: {metrics.to_dict()}")
+    assert result.iloc[0]["carb_intake_grams"] == 45
 
-        return metrics
+
+@pytest.mark.asyncio
+async def test_extract_activity_maps_database_columns(builder):
+    builder._fetch_all = AsyncMock(
+        return_value=[
+            {
+                "timestamp": datetime(
+                    2026,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                ),
+                "activity_intensity": "moderate",
+                "activity_duration_min": 30,
+            }
+        ]
+    )
+
+    result = await builder._extract_activity(
+        "internal-id",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert result.iloc[0]["activity_intensity"] == "moderate"
+    assert result.iloc[0]["activity_duration_min"] == 30
