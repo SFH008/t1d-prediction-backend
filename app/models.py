@@ -106,6 +106,11 @@ class Patient(Base):
         back_populates="patient",
         cascade="all, delete-orphan"
     )
+    meal_calculations = relationship(
+        "MealCalculation",
+        back_populates="patient",
+        cascade="all, delete-orphan"
+    )
     meals = relationship(
         "Meal",
         back_populates="patient",
@@ -281,6 +286,11 @@ class Meal(Base):
         cascade="all, delete-orphan",
         order_by="MealCarbGroup.group_number"
     )
+    calculations = relationship(
+        "MealCalculation",
+        back_populates="meal",
+        cascade="all, delete-orphan",
+    )
 
 
 class MealCarbGroup(Base):
@@ -331,6 +341,58 @@ class MealCarbGroup(Base):
             "group_number",
             name="uq_meal_carb_group_number"
         ),
+    )
+
+
+class MealCalculation(Base):
+    """Immutable snapshot of a meal dose calculation."""
+    __tablename__ = "meal_calculations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    meal_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+
+    calculated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    glucose_mg_dl = Column(Numeric(6, 2))
+    target_glucose_mg_dl = Column(Numeric(6, 2))
+
+    # Patient/time-of-day therapy snapshot.
+    # This is the carb factor requested for the meal calculation.
+    carb_factor_g_per_unit = Column(Numeric(8, 3))
+    insulin_sensitivity_mg_dl_per_unit = Column(Numeric(8, 2))
+
+    carbohydrate_total_grams = Column(Numeric(7, 1), nullable=False)
+
+    carbohydrate_dose_units = Column(Numeric(8, 2))
+    correction_dose_units = Column(Numeric(8, 2))
+    calculated_dose_units = Column(Numeric(8, 2))
+
+    calculation_version = Column(
+        String(50),
+        nullable=False,
+        default="1"
+    )
+    notes = Column(Text)
+
+    patient = relationship(
+        "Patient",
+        back_populates="meal_calculations"
+    )
+    meal = relationship(
+        "Meal",
+        back_populates="calculations"
     )
 
 

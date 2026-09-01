@@ -320,6 +320,45 @@ class CarbIntakeResponse(CarbIntakeCreate):
 
 
 # ============================================================================
+# Meal Calculation Schemas
+# ============================================================================
+
+class MealCalculationCreate(BaseModel):
+    """Inputs required to create a calculation snapshot."""
+    glucose_mg_dl: Optional[float] = Field(None, ge=20, le=600)
+    target_glucose_mg_dl: Optional[float] = Field(None, ge=40, le=300)
+    carb_factor_g_per_unit: float = Field(..., gt=0)
+    insulin_sensitivity_mg_dl_per_unit: Optional[float] = Field(
+        None,
+        gt=0
+    )
+
+
+class MealCalculationResponse(BaseModel):
+    """Calculation result and immutable input/rule snapshot."""
+    id: UUID
+    meal_id: UUID
+    patient_id: UUID
+    calculated_at: datetime
+
+    glucose_mg_dl: Optional[float]
+    target_glucose_mg_dl: Optional[float]
+    carb_factor_g_per_unit: Optional[float]
+    insulin_sensitivity_mg_dl_per_unit: Optional[float]
+
+    carbohydrate_total_grams: float
+    carbohydrate_dose_units: Optional[float]
+    correction_dose_units: Optional[float]
+    calculated_dose_units: Optional[float]
+
+    calculation_version: str
+    notes: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
 # Activity Schemas
 # ============================================================================
 

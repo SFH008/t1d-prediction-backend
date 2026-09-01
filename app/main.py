@@ -9,8 +9,6 @@ import logging
 
 from app.config import settings
 from app.database import init_db, close_db
-from app.config import settings
-from app.database import init_db, close_db
 from app.api import (
     health,
     patients,
@@ -19,6 +17,7 @@ from app.api import (
     therapy_limits,
     imports,
     carbs,
+    calculations,
     meals,
     activities,
     hormonal,
@@ -74,6 +73,7 @@ app.include_router(insulin.router)
 app.include_router(therapy_limits.router)
 app.include_router(imports.router)
 app.include_router(carbs.router)
+app.include_router(calculations.router)
 app.include_router(meals.router)
 app.include_router(activities.router)
 app.include_router(hormonal.router)

@@ -117,6 +117,48 @@
     CREATE INDEX idx_carbs_meal_type ON carb_intakes(meal_type);
     CREATE INDEX idx_carbs_patient_recent ON carb_intakes(patient_id, timestamp DESC);
 
+-- ============================================================================
+-- 5. MEAL CALCULATIONS
+-- ============================================================================
+-- Immutable snapshot of the inputs and therapy rules used to calculate a
+-- meal recommendation. This is deliberately separate from Dose 1 / Dose 2.
+CREATE TABLE meal_calculations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    meal_id UUID NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+
+    calculated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Glucose state at calculation time
+    glucose_mg_dl DECIMAL(6, 2),
+    target_glucose_mg_dl DECIMAL(6, 2),
+
+    -- Therapy-rule snapshot
+    carb_factor_g_per_unit DECIMAL(8, 3),
+    insulin_sensitivity_mg_dl_per_unit DECIMAL(8, 2),
+
+    -- Meal input snapshot
+    carbohydrate_total_grams DECIMAL(7, 1) NOT NULL,
+
+    -- Calculation components
+    carbohydrate_dose_units DECIMAL(8, 2),
+    correction_dose_units DECIMAL(8, 2),
+    calculated_dose_units DECIMAL(8, 2),
+
+    -- Calculation provenance
+    calculation_version VARCHAR(50) NOT NULL DEFAULT '1',
+    notes TEXT
+);
+
+CREATE INDEX idx_meal_calculations_meal
+    ON meal_calculations(meal_id, calculated_at DESC);
+CREATE INDEX idx_meal_calculations_patient
+    ON meal_calculations(patient_id, calculated_at DESC);
+
+-- ============================================================================
+-- 6. ACTIVITIES
+-- ============================================================================
+
     -- ============================================================================
     -- 4A. MEALS
     -- ============================================================================
