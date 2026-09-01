@@ -54,7 +54,7 @@ class Patient(Base):
 
     date_of_birth = Column(Date)
     sex = Column(String(1))
-    diabetes_type = Column(String(20))
+    diabetes_type = Column(String(20), nullable=False, default="type_1")
     diagnosis_date = Column(Date)
     time_zone = Column(String(50), default="UTC")
 
