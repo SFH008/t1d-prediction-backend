@@ -117,48 +117,6 @@
     CREATE INDEX idx_carbs_meal_type ON carb_intakes(meal_type);
     CREATE INDEX idx_carbs_patient_recent ON carb_intakes(patient_id, timestamp DESC);
 
--- ============================================================================
--- 5. MEAL CALCULATIONS
--- ============================================================================
--- Immutable snapshot of the inputs and therapy rules used to calculate a
--- meal recommendation. This is deliberately separate from Dose 1 / Dose 2.
-CREATE TABLE meal_calculations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    meal_id UUID NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-    patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
-
-    calculated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    -- Glucose state at calculation time
-    glucose_mg_dl DECIMAL(6, 2),
-    target_glucose_mg_dl DECIMAL(6, 2),
-
-    -- Therapy-rule snapshot
-    carb_factor_g_per_unit DECIMAL(8, 3),
-    insulin_sensitivity_mg_dl_per_unit DECIMAL(8, 2),
-
-    -- Meal input snapshot
-    carbohydrate_total_grams DECIMAL(7, 1) NOT NULL,
-
-    -- Calculation components
-    carbohydrate_dose_units DECIMAL(8, 2),
-    correction_dose_units DECIMAL(8, 2),
-    calculated_dose_units DECIMAL(8, 2),
-
-    -- Calculation provenance
-    calculation_version VARCHAR(50) NOT NULL DEFAULT '1',
-    notes TEXT
-);
-
-CREATE INDEX idx_meal_calculations_meal
-    ON meal_calculations(meal_id, calculated_at DESC);
-CREATE INDEX idx_meal_calculations_patient
-    ON meal_calculations(patient_id, calculated_at DESC);
-
--- ============================================================================
--- 6. ACTIVITIES
--- ============================================================================
-
     -- ============================================================================
     -- 4A. MEALS
     -- ============================================================================
@@ -243,7 +201,45 @@ CREATE INDEX idx_meal_calculations_patient
         ON meal_carb_groups(group_key);
 
     -- ============================================================================
-    -- 5. ACTIVITIES
+-- 5. MEAL CALCULATIONS
+-- ============================================================================
+-- Immutable snapshot of the inputs and therapy rules used to calculate a
+-- meal recommendation. This is deliberately separate from Dose 1 / Dose 2.
+CREATE TABLE meal_calculations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    meal_id UUID NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+
+    calculated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Glucose state at calculation time
+    glucose_mg_dl DECIMAL(6, 2),
+    target_glucose_mg_dl DECIMAL(6, 2),
+
+    -- Therapy-rule snapshot
+    carb_factor_g_per_unit DECIMAL(8, 3),
+    insulin_sensitivity_mg_dl_per_unit DECIMAL(8, 2),
+
+    -- Meal input snapshot
+    carbohydrate_total_grams DECIMAL(7, 1) NOT NULL,
+
+    -- Calculation components
+    carbohydrate_dose_units DECIMAL(8, 2),
+    correction_dose_units DECIMAL(8, 2),
+    calculated_dose_units DECIMAL(8, 2),
+
+    -- Calculation provenance
+    calculation_version VARCHAR(50) NOT NULL DEFAULT '1',
+    notes TEXT
+);
+
+CREATE INDEX idx_meal_calculations_meal
+    ON meal_calculations(meal_id, calculated_at DESC);
+CREATE INDEX idx_meal_calculations_patient
+    ON meal_calculations(patient_id, calculated_at DESC);
+
+-- ============================================================================
+    -- 6. ACTIVITIES
     -- ============================================================================
     CREATE TABLE activities (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -266,7 +262,7 @@ CREATE INDEX idx_meal_calculations_patient
     CREATE INDEX idx_activity_patient_recent ON activities(patient_id, timestamp DESC);
 
     -- ============================================================================
-    -- 6. HORMONAL_CONTEXTS (UPDATED: User-provided vs. learned distinction)
+    -- 7. HORMONAL_CONTEXTS (UPDATED: User-provided vs. learned distinction)
     -- ============================================================================
     CREATE TABLE hormonal_contexts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -290,7 +286,7 @@ CREATE INDEX idx_meal_calculations_patient
     CREATE INDEX idx_hormonal_patient_day ON hormonal_contexts(patient_id, DATE(timestamp) DESC);
 
     -- ============================================================================
-    -- 7. THERAPY_LIMITS
+    -- 8. THERAPY_LIMITS
     -- ============================================================================
     CREATE TABLE therapy_limits (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -312,7 +308,7 @@ CREATE INDEX idx_meal_calculations_patient
     CREATE INDEX idx_therapy_limits_tod ON therapy_limits(patient_id, time_of_day_start, day_of_week);
 
     -- ============================================================================
-    -- 8. USER_SETTINGS (UPDATED: Safety bias and model selection)
+    -- 9. USER_SETTINGS (UPDATED: Safety bias and model selection)
     -- ============================================================================
     CREATE TABLE user_settings (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -344,7 +340,7 @@ CREATE INDEX idx_meal_calculations_patient
     CREATE INDEX idx_settings_patient ON user_settings(patient_id);
 
     -- ============================================================================
-    -- 9. TIME_OF_DAY_PROFILES
+    -- 10. TIME_OF_DAY_PROFILES
     -- ============================================================================
     CREATE TABLE time_of_day_profiles (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -366,7 +362,7 @@ CREATE INDEX idx_meal_calculations_patient
     CREATE INDEX idx_profile_time ON time_of_day_profiles(time_period_start, time_period_end);
 
     -- ============================================================================
-    -- 10. FORECAST_RESULTS (UPDATED: Threshold crossing indicators)
+    -- 11. FORECAST_RESULTS (UPDATED: Threshold crossing indicators)
     -- ============================================================================
     CREATE TABLE forecast_results (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -409,7 +405,7 @@ CREATE INDEX idx_meal_calculations_patient
         WHERE will_cross_54_mg_dl = TRUE;
 
     -- ============================================================================
-    -- 10b. FORECAST_PREDICTIONS (NEW: Separate table for 72-point trajectories)
+    -- 11b. FORECAST_PREDICTIONS (NEW: Separate table for 72-point trajectories)
     -- ============================================================================
     CREATE TABLE forecast_predictions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -437,7 +433,7 @@ CREATE INDEX idx_meal_calculations_patient
         WHERE crosses_threshold_54 = TRUE;
 
     -- ============================================================================
-    -- 11. MODEL_TRAINING_LOGS (UPDATED: R², safety metrics, validation gate)
+    -- 12. MODEL_TRAINING_LOGS (UPDATED: R², safety metrics, validation gate)
     -- ============================================================================
     CREATE TABLE model_training_logs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -486,7 +482,7 @@ CREATE INDEX idx_meal_calculations_patient
         WHERE model_passed_validation = TRUE;
 
     -- ============================================================================
-    -- 12. DATA_IMPORT_LOGS
+    -- 13. DATA_IMPORT_LOGS
     -- ============================================================================
     CREATE TABLE data_import_logs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -574,10 +570,3 @@ CREATE INDEX idx_meal_calculations_patient
 
     CREATE TRIGGER flag_glucose_thresholds_on_update BEFORE UPDATE ON glucose_readings
         FOR EACH ROW EXECUTE FUNCTION flag_glucose_thresholds();
-    -- T1D Glucose Forecasting System - Corrected Database Schema
-    -- Incorporates all critical and high-priority gaps from validation
-    -- PostgreSQL DDL Definitions
-
-    -- ============================================================================
-    -- 1. PATIENTS (UPDATED: Device status cache)
-    -- ============================================================================

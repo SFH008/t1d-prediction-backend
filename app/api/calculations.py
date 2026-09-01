@@ -174,7 +174,7 @@ async def calculate_meal(
 
     try:
         therapy_context = resolve_therapy_context(
-            meal_timestamp=meal.occurred_at,
+            meal_timestamp=meal.meal_timestamp,
             time_of_day_profiles=time_of_day_profiles,
             therapy_limits=therapy_limits,
             settings=settings,
