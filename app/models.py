@@ -203,19 +203,24 @@ class CarbIntake(Base):
     __tablename__ = "carb_intakes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    patient_id = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
-    carbs_grams = Column(Numeric(8, 2), nullable=False)
-    food_description = Column(String(500))
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id"),
+        nullable=False,
+        index=True
+    )
+    carbs_grams = Column(Numeric(6, 1), nullable=False)
+    food_description = Column(Text)
     food_category = Column(String(100))
-    meal_type = Column(String(50))  # 'breakfast', 'lunch', 'snack', 'dinner'
+    meal_type = Column(String(50))
+    confidence_level = Column(String(20))
+
     timestamp = Column(DateTime, nullable=False, index=True)
-    source = Column(String(100), default="manual")  # 'manual', 'food_app', etc.
-    is_estimated = Column(Boolean, default=False)
-    confidence_level = Column(Numeric(5, 2))  # 0-100% confidence
-
     recorded_at = Column(DateTime, default=datetime.utcnow)
+    source = Column(String(50))
+    is_estimated = Column(Boolean, default=False)
+    notes = Column(Text)
 
-    # Relationship
     patient = relationship("Patient", back_populates="carb_intakes")
 
 

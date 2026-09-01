@@ -246,7 +246,7 @@ class CarbIntakeCreate(BaseModel):
     timestamp: datetime
     source: Optional[str] = "manual"
     is_estimated: Optional[bool] = False
-    confidence_level: Optional[float] = None
+    confidence_level: Optional[str] = None
 
 
 class CarbIntakeResponse(CarbIntakeCreate):
