@@ -37,6 +37,71 @@ def _round_units(value: Decimal) -> Decimal:
     response_model=MealCalculationResponse,
     status_code=201,
 )
+
+class MealDoseCalculationResult:
+    """Pure in-memory result of a meal dose calculation."""
+
+    def __init__(
+        self,
+        carbohydrate_dose_units: Decimal,
+        correction_dose_units: Decimal,
+        calculated_dose_units: Decimal,
+    ):
+        self.carbohydrate_dose_units = carbohydrate_dose_units
+        self.correction_dose_units = correction_dose_units
+        self.calculated_dose_units = calculated_dose_units
+
+
+def calculate_meal_dose(
+    carbohydrate_total_grams,
+    carb_factor_g_per_unit,
+    glucose_mg_dl=None,
+    target_glucose_mg_dl=None,
+    insulin_sensitivity_mg_dl_per_unit=None,
+):
+    """
+    Pure meal dose calculation.
+
+    This function performs no database access and creates no database
+    objects. It is therefore safe to test independently of the API/database.
+    """
+    carb_total = Decimal(str(carbohydrate_total_grams))
+    carb_factor = Decimal(str(carb_factor_g_per_unit))
+
+    carbohydrate_dose = _round_units(
+        carb_total / carb_factor
+    )
+
+    correction_dose = Decimal("0")
+
+    if (
+        glucose_mg_dl is not None
+        and target_glucose_mg_dl is not None
+        and insulin_sensitivity_mg_dl_per_unit is not None
+    ):
+        correction_dose = _round_units(
+            (
+                Decimal(str(glucose_mg_dl))
+                - Decimal(str(target_glucose_mg_dl))
+            )
+            / Decimal(str(insulin_sensitivity_mg_dl_per_unit))
+        )
+
+        correction_dose = max(
+            correction_dose,
+            Decimal("0"),
+        )
+
+    calculated_dose = _round_units(
+        carbohydrate_dose + correction_dose
+    )
+
+    return MealDoseCalculationResult(
+        carbohydrate_dose_units=carbohydrate_dose,
+        correction_dose_units=correction_dose,
+        calculated_dose_units=calculated_dose,
+    )
+
 async def calculate_meal(
     patient_id: UUID,
     meal_id: UUID,
@@ -68,41 +133,24 @@ async def calculate_meal(
             detail=f"Meal {meal_id} not found",
         )
 
+    calculation_result = calculate_meal_dose(
+        carbohydrate_total_grams=meal.total_carbs_grams,
+        carb_factor_g_per_unit=calculation_create.carb_factor_g_per_unit,
+        glucose_mg_dl=calculation_create.glucose_mg_dl,
+        target_glucose_mg_dl=calculation_create.target_glucose_mg_dl,
+        insulin_sensitivity_mg_dl_per_unit=(
+            calculation_create.insulin_sensitivity_mg_dl_per_unit
+        ),
+    )
+
     carb_total = Decimal(str(meal.total_carbs_grams))
     carb_factor = Decimal(
         str(calculation_create.carb_factor_g_per_unit)
     )
 
-    carbohydrate_dose = _round_units(
-        carb_total / carb_factor
-    )
-
-    correction_dose = Decimal("0")
-    if (
-        calculation_create.glucose_mg_dl is not None
-        and calculation_create.target_glucose_mg_dl is not None
-        and calculation_create.insulin_sensitivity_mg_dl_per_unit
-        is not None
-    ):
-        correction_dose = _round_units(
-            (
-                Decimal(str(calculation_create.glucose_mg_dl))
-                - Decimal(str(calculation_create.target_glucose_mg_dl))
-            )
-            / Decimal(
-                str(
-                    calculation_create
-                    .insulin_sensitivity_mg_dl_per_unit
-                )
-            )
-        )
-
-        # A correction should not become negative insulin.
-        correction_dose = max(correction_dose, Decimal("0"))
-
-    calculated_dose = _round_units(
-        carbohydrate_dose + correction_dose
-    )
+    carbohydrate_dose = calculation_result.carbohydrate_dose_units
+    correction_dose = calculation_result.correction_dose_units
+    calculated_dose = calculation_result.calculated_dose_units
 
     calculation = MealCalculation(
         meal_id=meal.id,

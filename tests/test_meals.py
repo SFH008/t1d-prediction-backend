@@ -1,9 +1,11 @@
 from datetime import datetime
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
 from app.api.meals import calculate_group_carbs
+from app.api.calculations import calculate_meal_dose
 from app.schema.schemas import MealCreate
 
 
@@ -140,7 +142,18 @@ def test_negative_carb_factor_is_rejected():
                 }
             ],
         )
+def test_meal_dose_calculation():
+    result = calculate_meal_dose(
+        carbohydrate_total_grams=75,
+        carb_factor_g_per_unit=10,
+        glucose_mg_dl=180,
+        target_glucose_mg_dl=100,
+        insulin_sensitivity_mg_dl_per_unit=40,
+    )
 
+    assert result.carbohydrate_dose_units == Decimal("7.50")
+    assert result.correction_dose_units == Decimal("2.00")
+    assert result.calculated_dose_units == Decimal("9.50")
 
 def test_zero_carb_factor_is_valid():
     meal = MealCreate(
