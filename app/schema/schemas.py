@@ -324,14 +324,8 @@ class CarbIntakeResponse(CarbIntakeCreate):
 # ============================================================================
 
 class MealCalculationCreate(BaseModel):
-    """Inputs required to create a calculation snapshot."""
+    """Inputs supplied by the client for a meal calculation."""
     glucose_mg_dl: Optional[float] = Field(None, ge=20, le=600)
-    target_glucose_mg_dl: Optional[float] = Field(None, ge=40, le=300)
-    carb_factor_g_per_unit: float = Field(..., gt=0)
-    insulin_sensitivity_mg_dl_per_unit: Optional[float] = Field(
-        None,
-        gt=0
-    )
 
 
 class MealCalculationResponse(BaseModel):
