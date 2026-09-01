@@ -353,11 +353,24 @@ class DataValidator:
         date_range = ""
         if 'timestamp' in df.columns:
             df_check = df.copy()
-            df_check['timestamp'] = pd.to_datetime(df_check['timestamp'], utc=True)
-            start = df_check['timestamp'].min()
-            end = df_check['timestamp'].max()
-            duration_hours = (end - start).total_seconds() / 3600
-            date_range = f"\nDate Range: {start} → {end} ({duration_hours:.1f} hours)"
+            df_check['timestamp'] = pd.to_datetime(
+                df_check['timestamp'],
+                utc=True,
+                errors='coerce',
+            )
+
+            valid_timestamps = df_check['timestamp'].dropna()
+
+            if not valid_timestamps.empty:
+                start = valid_timestamps.min()
+                end = valid_timestamps.max()
+                duration_hours = (end - start).total_seconds() / 3600
+                date_range = (
+                    f"\nDate Range: {start} → {end} "
+                    f"({duration_hours:.1f} hours)"
+                )
+            else:
+                date_range = "\nDate Range: unavailable (no valid timestamps)"
 
         lines.append(f"Dataset: {len(df)} samples{date_range}")
         lines.append("")
