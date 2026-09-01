@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     JSON,
+    UniqueConstraint,
 )
 
 from sqlalchemy.dialects.postgresql import UUID
@@ -102,6 +103,11 @@ class Patient(Base):
     )
     carb_intakes = relationship(
         "CarbIntake",
+        back_populates="patient",
+        cascade="all, delete-orphan"
+    )
+    meals = relationship(
+        "Meal",
         back_populates="patient",
         cascade="all, delete-orphan"
     )
@@ -222,6 +228,110 @@ class CarbIntake(Base):
     notes = Column(Text)
 
     patient = relationship("Patient", back_populates="carb_intakes")
+
+
+class Meal(Base):
+    """
+    User-entered meal.
+
+    Meal is the aggregate root for carbohydrate capture. Individual
+    carbohydrate groups belong to a meal and are never standalone
+    user interactions at this layer.
+
+    Step 1 state:
+        captured
+
+    Later states will be introduced for:
+        calculation -> dose_1 -> dose_2 -> confirmed -> actual
+    """
+    __tablename__ = "meals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id"),
+        nullable=False,
+        index=True
+    )
+
+    meal_timestamp = Column(DateTime, nullable=False, index=True)
+    meal_category = Column(String(50), nullable=False)
+
+    # Step 1 lifecycle state. Keep this explicit now so later stages can
+    # extend the same meal aggregate without changing its identity.
+    status = Column(String(30), nullable=False, default="captured")
+
+    # Snapshot of the calculated total at capture time.
+    total_carbs_grams = Column(Numeric(8, 1), nullable=False, default=0)
+
+    source = Column(String(50), nullable=False, default="manual")
+    notes = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+    patient = relationship("Patient", back_populates="meals")
+    carb_groups = relationship(
+        "MealCarbGroup",
+        back_populates="meal",
+        cascade="all, delete-orphan",
+        order_by="MealCarbGroup.group_number"
+    )
+
+
+class MealCarbGroup(Base):
+    """
+    One carbohydrate group within a meal.
+
+    quantity_grams is the quantity of the food/group entered by the user.
+    carb_factor_g_per_g expresses how many grams of carbohydrate are
+    contributed by one gram of that food/group.
+
+    Example:
+        quantity_grams = 100
+        carb_factor_g_per_g = 0.30
+        carbs_grams = 30
+
+    carb_factor_g_per_g is deliberately stored on the event. This preserves
+    the exact factor used when the meal was captured even if the predefined
+    food definition changes later.
+    """
+    __tablename__ = "meal_carb_groups"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    meal_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+
+    # 1..12. Group 12 is reserved for future custom carbohydrate support.
+    group_number = Column(Integer, nullable=False)
+    group_key = Column(String(100), nullable=False)
+    group_name = Column(String(255), nullable=False)
+
+    quantity_grams = Column(Numeric(8, 1), nullable=False)
+    carb_factor_g_per_g = Column(Numeric(8, 5), nullable=False)
+
+    # Snapshot of quantity * carb factor.
+    carbs_grams = Column(Numeric(8, 1), nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    meal = relationship("Meal", back_populates="carb_groups")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "meal_id",
+            "group_number",
+            name="uq_meal_carb_group_number"
+        ),
+    )
 
 
 class Activity(Base):

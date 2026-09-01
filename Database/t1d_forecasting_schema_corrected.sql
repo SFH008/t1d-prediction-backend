@@ -118,6 +118,89 @@
     CREATE INDEX idx_carbs_patient_recent ON carb_intakes(patient_id, timestamp DESC);
 
     -- ============================================================================
+    -- 4A. MEALS
+    -- ============================================================================
+    -- Meal is the aggregate root for user-entered carbohydrate capture.
+    -- The meal owns up to 12 carbohydrate groups.
+    --
+    -- Step 1 lifecycle:
+    --     captured
+    --
+    -- Later lifecycle states will be added for calculation, dose 1,
+    -- dose 2, confirmation and actual intake.
+    -- ============================================================================
+    CREATE TABLE meals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+        meal_timestamp TIMESTAMP NOT NULL,
+        meal_category VARCHAR(50) NOT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'captured',
+        total_carbs_grams DECIMAL(8, 1) NOT NULL DEFAULT 0,
+        source VARCHAR(50) NOT NULL DEFAULT 'manual',
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT chk_meal_status
+            CHECK (status IN ('captured')),
+
+        CONSTRAINT chk_meal_total_carbs
+            CHECK (total_carbs_grams >= 0)
+    );
+
+    CREATE INDEX idx_meals_patient_time
+        ON meals(patient_id, meal_timestamp DESC);
+
+    CREATE INDEX idx_meals_patient_status
+        ON meals(patient_id, status);
+
+    -- ============================================================================
+    -- 4B. MEAL CARBOHYDRATE GROUPS
+    -- ============================================================================
+    -- A group represents one of the predefined carbohydrate groups.
+    --
+    -- group_number:
+    --     1-11 = predefined groups
+    --     12   = reserved for future Custom implementation
+    --
+    -- carb_factor_g_per_g is stored as an event snapshot.
+    -- Therefore historical meals remain reproducible if a food definition
+    -- changes later.
+    -- ============================================================================
+    CREATE TABLE meal_carb_groups (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        meal_id UUID NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+        group_number INTEGER NOT NULL,
+        group_key VARCHAR(100) NOT NULL,
+        group_name VARCHAR(255) NOT NULL,
+        quantity_grams DECIMAL(8, 1) NOT NULL,
+        carb_factor_g_per_g DECIMAL(8, 5) NOT NULL,
+        carbs_grams DECIMAL(8, 1) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT uq_meal_carb_group_number
+            UNIQUE (meal_id, group_number),
+
+        CONSTRAINT chk_meal_carb_group_number
+            CHECK (group_number BETWEEN 1 AND 12),
+
+        CONSTRAINT chk_meal_carb_quantity
+            CHECK (quantity_grams >= 0),
+
+        CONSTRAINT chk_meal_carb_factor
+            CHECK (carb_factor_g_per_g >= 0 AND carb_factor_g_per_g <= 1),
+
+        CONSTRAINT chk_meal_carb_contribution
+            CHECK (carbs_grams >= 0)
+    );
+
+    CREATE INDEX idx_meal_carb_groups_meal
+        ON meal_carb_groups(meal_id, group_number);
+
+    CREATE INDEX idx_meal_carb_groups_key
+        ON meal_carb_groups(group_key);
+
+    -- ============================================================================
     -- 5. ACTIVITIES
     -- ============================================================================
     CREATE TABLE activities (

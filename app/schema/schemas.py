@@ -234,6 +234,66 @@ class ForecastResultResponse(BaseModel):
 
 
 # ============================================================================
+# Meal / Carb Capture Schemas
+# ============================================================================
+
+class MealCarbGroupCreate(BaseModel):
+    """
+    One carbohydrate group captured as part of a meal.
+
+    quantity_grams is the food quantity.
+    carb_factor_g_per_g is the carbohydrate contribution per gram.
+    """
+    group_number: int = Field(..., ge=1, le=12)
+    group_key: str = Field(..., min_length=1, max_length=100)
+    group_name: str = Field(..., min_length=1, max_length=255)
+    quantity_grams: float = Field(..., ge=0, le=5000)
+    carb_factor_g_per_g: float = Field(..., ge=0, le=1)
+
+
+class MealCreate(BaseModel):
+    """
+    Create a complete meal.
+
+    The meal is the primary interaction. Carb groups are submitted together
+    as one atomic request.
+    """
+    meal_timestamp: datetime
+    meal_category: str = Field(..., min_length=1, max_length=50)
+    carb_groups: List[MealCarbGroupCreate] = Field(
+        ..., min_length=1, max_length=12
+    )
+    source: Optional[str] = "manual"
+    notes: Optional[str] = None
+
+
+class MealCarbGroupResponse(MealCarbGroupCreate):
+    id: UUID
+    carbs_grams: float
+
+    class Config:
+        from_attributes = True
+
+
+class MealResponse(BaseModel):
+    id: UUID
+    patient_id: UUID
+    meal_timestamp: datetime
+    meal_category: str
+    status: str
+    total_carbs_grams: float
+    source: str
+    notes: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+    carb_groups: List[MealCarbGroupResponse]
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# ============================================================================
 # Carb Intake Schemas
 # ============================================================================
 
