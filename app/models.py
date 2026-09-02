@@ -4,17 +4,18 @@ Matches the corrected PostgreSQL schema.
 """
 
 from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
     Column,
-    String,
-    Integer,
-    Numeric,
     Date,
     DateTime,
-    Time,
-    Boolean,
     ForeignKey,
-    Text,
+    Integer,
     JSON,
+    Numeric,
+    String,
+    Text,
+    Time,
     UniqueConstraint,
 )
 
@@ -254,6 +255,79 @@ class CarbIntake(Base):
     notes = Column(Text)
 
     patient = relationship("Patient", back_populates="carb_intakes")
+
+
+class CarbGroupDefinition(Base):
+    """
+    System-admin managed carbohydrate group definition.
+
+    carb_factor_g_per_g expresses how many grams of carbohydrate
+    are contributed by one gram of food quantity.
+
+    MealCarbGroup stores a snapshot of the values actually used
+    when a meal is captured.
+    """
+
+    __tablename__ = "carb_group_definitions"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    group_number = Column(
+        Integer,
+        nullable=False,
+        unique=True,
+    )
+
+    group_key = Column(
+        String(100),
+        nullable=False,
+        unique=True,
+    )
+
+    group_name = Column(
+        String(255),
+        nullable=False,
+    )
+
+    carb_factor_g_per_g = Column(
+        Numeric(8, 5),
+        nullable=False,
+    )
+
+    is_active = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "group_number BETWEEN 1 AND 12",
+            name="ck_carb_group_definitions_group_number",
+        ),
+        CheckConstraint(
+            "carb_factor_g_per_g >= 0 "
+            "AND carb_factor_g_per_g <= 1",
+            name="ck_carb_group_definitions_factor",
+        ),
+    )
 
 
 class Meal(Base):

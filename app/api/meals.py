@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import Meal, MealCarbGroup, Patient
+from app.models import (
+    CarbGroupDefinition,
+    Meal,
+    MealCarbGroup,
+    Patient,
+)
 from app.schema.schemas import (
     MealCreate,
     MealResponse,
@@ -105,17 +110,46 @@ async def create_meal(
     total_carbs = Decimal("0.0")
 
     for group in meal_create.carb_groups:
+        definition_stmt = select(
+            CarbGroupDefinition
+        ).where(
+            CarbGroupDefinition.group_number
+            == group.group_number,
+            CarbGroupDefinition.is_active.is_(True),
+        )
+
+        definition_result = await db.execute(
+            definition_stmt
+        )
+
+        definition = (
+            definition_result.scalar_one_or_none()
+        )
+
+        if definition is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No active carbohydrate definition "
+                    f"exists for group {group.group_number}"
+                ),
+            )
+
         carbs_grams = calculate_group_carbs(
             group.quantity_grams,
-            group.carb_factor_g_per_g,
+            definition.carb_factor_g_per_g,
         )
 
         meal_group = MealCarbGroup(
-            group_number=group.group_number,
-            group_key=group.group_key,
-            group_name=group.group_name,
-            quantity_grams=Decimal(str(group.quantity_grams)),
-            carb_factor_g_per_g=Decimal(str(group.carb_factor_g_per_g)),
+            group_number=definition.group_number,
+            group_key=definition.group_key,
+            group_name=definition.group_name,
+            quantity_grams=Decimal(
+                str(group.quantity_grams)
+            ),
+            carb_factor_g_per_g=Decimal(
+                str(definition.carb_factor_g_per_g)
+            ),
             carbs_grams=carbs_grams,
         )
 

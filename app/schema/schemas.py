@@ -2,11 +2,10 @@
 Pydantic schemas for API request/response validation.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
-
 
 # ============================================================================
 # Patient Schemas
@@ -239,16 +238,31 @@ class ForecastResultResponse(BaseModel):
 
 class MealCarbGroupCreate(BaseModel):
     """
-    One carbohydrate group captured as part of a meal.
+    One carbohydrate group submitted as part of a meal.
 
-    quantity_grams is the food quantity.
-    carb_factor_g_per_g is the carbohydrate contribution per gram.
+    The client supplies only the canonical group number and
+    food quantity. Group metadata and carb conversion factor
+    are resolved by the backend.
     """
+
+    model_config = ConfigDict(extra="forbid")
+
     group_number: int = Field(..., ge=1, le=12)
-    group_key: str = Field(..., min_length=1, max_length=100)
-    group_name: str = Field(..., min_length=1, max_length=255)
-    quantity_grams: float = Field(..., ge=0, le=5000)
-    carb_factor_g_per_g: float = Field(..., ge=0, le=1)
+    quantity_grams: float = Field(..., gt=0, le=5000)
+
+
+class MealCarbGroupResponse(BaseModel):
+    id: UUID
+    group_number: int
+    group_key: str
+    group_name: str
+    quantity_grams: float
+    carb_factor_g_per_g: float
+    carbs_grams: float
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class MealCreate(BaseModel):
