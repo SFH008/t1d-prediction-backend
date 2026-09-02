@@ -13,6 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -21,6 +22,7 @@ from app.models import (
     DoseStrategySettings,
     Meal,
     MealCalculation,
+    MealDoseEvent,
     Patient,
     TherapyLimit,
     TimeOfDayProfile,
@@ -235,6 +237,31 @@ def calculate_split_dose(
     )
 
 
+def _meal_absorption_classification_is_unset(meal: Meal) -> bool:
+    """Return True only when no explicit/stored meal classification exists."""
+    return (
+        meal.absorption_profile_id is None
+        and meal.absorption_profile_key is None
+        and meal.absorption_classification_source is None
+    )
+
+
+def _persist_derived_absorption_classification(
+    *,
+    meal: Meal,
+    absorption_profile: CarbAbsorptionProfile,
+    classification_source: str,
+) -> bool:
+    """Persist derived classification without overwriting explicit meal metadata."""
+    if not _meal_absorption_classification_is_unset(meal):
+        return False
+
+    meal.absorption_profile_id = absorption_profile.id
+    meal.absorption_profile_key = absorption_profile.profile_key
+    meal.absorption_classification_source = classification_source
+    return True
+
+
 def _absorption_profile_key_for_meal(meal: Meal) -> tuple[str, str]:
     """Baseline deterministic meal-type classifier; future models can replace it."""
     if meal.absorption_profile_key:
@@ -262,6 +289,66 @@ def _absorption_profile_key_for_meal(meal: Meal) -> tuple[str, str]:
     if category in slow:
         return "slow", "meal_category_rule_v1"
     return "medium", "meal_category_rule_v1"
+
+
+def _planned_dose_events_for_calculation(
+    *,
+    calculation: MealCalculation,
+    meal: Meal,
+) -> list[MealDoseEvent]:
+    """Build the immutable execution plan corresponding to one v3 calculation."""
+    if calculation.id is None:
+        raise ValueError("Calculation must have an id before dose events are built")
+    if calculation.dose_2_timestamp is None:
+        raise ValueError("Version-3 calculation requires a Dose 2 timestamp")
+    if calculation.dose_1_units is None or calculation.dose_2_units is None:
+        raise ValueError("Version-3 calculation requires both planned doses")
+
+    return [
+        MealDoseEvent(
+            patient_id=calculation.patient_id,
+            meal_id=calculation.meal_id,
+            calculation_id=calculation.id,
+            dose_number=1,
+            planned_timestamp=meal.meal_timestamp,
+            planned_units=calculation.dose_1_units,
+            status="planned",
+        ),
+        MealDoseEvent(
+            patient_id=calculation.patient_id,
+            meal_id=calculation.meal_id,
+            calculation_id=calculation.id,
+            dose_number=2,
+            planned_timestamp=calculation.dose_2_timestamp,
+            planned_units=calculation.dose_2_units,
+            status="planned",
+        ),
+    ]
+
+
+async def _persist_calculation_with_dose_plan(
+    *,
+    db: AsyncSession,
+    calculation: MealCalculation,
+    meal: Meal,
+) -> None:
+    """Persist calculation and its two planned tracker events atomically."""
+    try:
+        db.add(calculation)
+        # UUID defaults are populated during flush; tracker rows need the exact id.
+        await db.flush()
+        db.add_all(
+            _planned_dose_events_for_calculation(
+                calculation=calculation,
+                meal=meal,
+            )
+        )
+        await db.commit()
+    except (SQLAlchemyError, ValueError):
+        await db.rollback()
+        raise
+
+    await db.refresh(calculation)
 
 
 @router.post(
@@ -363,6 +450,12 @@ async def calculate_meal(
             ),
         )
 
+    _persist_derived_absorption_classification(
+        meal=meal,
+        absorption_profile=absorption_profile,
+        classification_source=classification_source,
+    )
+
     addon_percent = (
         meal.fat_protein_addon_percent
         if meal.fat_protein_addon_percent is not None
@@ -437,7 +530,16 @@ async def calculate_meal(
         ),
     )
 
-    db.add(calculation)
-    await db.commit()
-    await db.refresh(calculation)
+    try:
+        await _persist_calculation_with_dose_plan(
+            db=db,
+            calculation=calculation,
+            meal=meal,
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist calculation and dose plan",
+        ) from exc
+
     return calculation

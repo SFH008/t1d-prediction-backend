@@ -2,9 +2,20 @@
 Tests for the Meal -> Calculation transition.
 """
 
+from datetime import datetime
 from decimal import Decimal
+from uuid import uuid4
 
-from app.api.calculations import _round_units
+import pytest
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.api.calculations import (
+    _persist_calculation_with_dose_plan,
+    _persist_derived_absorption_classification,
+    _planned_dose_events_for_calculation,
+    _round_units,
+)
+from app.models import CarbAbsorptionProfile, Meal, MealCalculation
 
 
 def test_round_units():
@@ -119,3 +130,186 @@ def test_split_dose_applies_fat_protein_addon_before_split():
     assert result.effective_carbohydrate_grams == Decimal("60")
     assert result.dose_1_carbohydrate_grams == Decimal("30")
     assert result.dose_2_carbohydrate_grams == Decimal("30")
+
+def _tracker_test_calculation(*, calculation_id=None):
+    return MealCalculation(
+        id=calculation_id or uuid4(),
+        meal_id=uuid4(),
+        patient_id=uuid4(),
+        carbohydrate_total_grams=Decimal("10.0"),
+        dose_1_units=Decimal("0.500"),
+        dose_2_units=Decimal("0.300"),
+        dose_2_timestamp=datetime(2026, 9, 2, 11, 55),
+        calculation_version="3",
+    )
+
+
+def test_v3_calculation_builds_exactly_two_planned_dose_events():
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 2, 10, 40),
+        meal_category="test",
+        total_carbs_grams=Decimal("10.0"),
+    )
+    calculation = _tracker_test_calculation()
+    calculation.meal_id = meal.id
+    calculation.patient_id = meal.patient_id
+
+    events = _planned_dose_events_for_calculation(
+        calculation=calculation,
+        meal=meal,
+    )
+
+    assert len(events) == 2
+    assert [event.dose_number for event in events] == [1, 2]
+    assert all(event.calculation_id == calculation.id for event in events)
+    assert events[0].planned_timestamp == meal.meal_timestamp
+    assert events[1].planned_timestamp == calculation.dose_2_timestamp
+    assert events[0].planned_units == Decimal("0.500")
+    assert events[1].planned_units == Decimal("0.300")
+    assert all(event.status == "planned" for event in events)
+    assert all(event.actual_timestamp is None for event in events)
+    assert all(event.actual_units is None for event in events)
+    assert all(event.insulin_event_id is None for event in events)
+
+
+def test_recalculation_builds_new_tracker_plan_without_mutating_prior_plan():
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 2, 10, 40),
+        meal_category="test",
+        total_carbs_grams=Decimal("10.0"),
+    )
+    first = _tracker_test_calculation()
+    second = _tracker_test_calculation()
+    for calculation in (first, second):
+        calculation.meal_id = meal.id
+        calculation.patient_id = meal.patient_id
+
+    first_events = _planned_dose_events_for_calculation(
+        calculation=first,
+        meal=meal,
+    )
+    second_events = _planned_dose_events_for_calculation(
+        calculation=second,
+        meal=meal,
+    )
+
+    assert first.id != second.id
+    assert {event.calculation_id for event in first_events} == {first.id}
+    assert {event.calculation_id for event in second_events} == {second.id}
+
+
+class _FailingCommitSession:
+    def __init__(self):
+        self.added = []
+        self.added_all = []
+        self.rollback_called = False
+
+    def add(self, item):
+        self.added.append(item)
+
+    async def flush(self):
+        return None
+
+    def add_all(self, items):
+        self.added_all.extend(items)
+
+    async def commit(self):
+        raise SQLAlchemyError("forced tracker persistence failure")
+
+    async def rollback(self):
+        self.rollback_called = True
+
+    async def refresh(self, item):
+        raise AssertionError("refresh must not run after failed commit")
+
+
+@pytest.mark.asyncio
+async def test_calculation_and_tracker_plan_roll_back_together_on_failure():
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 2, 10, 40),
+        meal_category="test",
+        total_carbs_grams=Decimal("10.0"),
+    )
+    calculation = _tracker_test_calculation()
+    calculation.meal_id = meal.id
+    calculation.patient_id = meal.patient_id
+    session = _FailingCommitSession()
+
+    with pytest.raises(SQLAlchemyError):
+        await _persist_calculation_with_dose_plan(
+            db=session,
+            calculation=calculation,
+            meal=meal,
+        )
+
+    assert len(session.added) == 1
+    assert len(session.added_all) == 2
+    assert session.rollback_called is True
+
+
+def test_derived_absorption_classification_is_persisted_on_unclassified_meal():
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 2, 10, 40),
+        meal_category="test",
+        total_carbs_grams=Decimal("10.0"),
+    )
+    profile = CarbAbsorptionProfile(
+        id=uuid4(),
+        patient_id=meal.patient_id,
+        profile_key="medium",
+        profile_name="Medium",
+        duration_minutes=150,
+        absorption_delay_minutes=10,
+    )
+
+    changed = _persist_derived_absorption_classification(
+        meal=meal,
+        absorption_profile=profile,
+        classification_source="meal_category_rule_v1",
+    )
+
+    assert changed is True
+    assert meal.absorption_profile_id == profile.id
+    assert meal.absorption_profile_key == "medium"
+    assert meal.absorption_classification_source == "meal_category_rule_v1"
+
+
+def test_derived_absorption_classification_does_not_overwrite_explicit_meal():
+    explicit_profile_id = uuid4()
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 2, 10, 40),
+        meal_category="pizza",
+        total_carbs_grams=Decimal("10.0"),
+        absorption_profile_id=explicit_profile_id,
+        absorption_profile_key="slow",
+        absorption_classification_source="manual",
+    )
+    derived_profile = CarbAbsorptionProfile(
+        id=uuid4(),
+        patient_id=meal.patient_id,
+        profile_key="medium",
+        profile_name="Medium",
+        duration_minutes=150,
+        absorption_delay_minutes=10,
+    )
+
+    changed = _persist_derived_absorption_classification(
+        meal=meal,
+        absorption_profile=derived_profile,
+        classification_source="meal_category_rule_v1",
+    )
+
+    assert changed is False
+    assert meal.absorption_profile_id == explicit_profile_id
+    assert meal.absorption_profile_key == "slow"
+    assert meal.absorption_classification_source == "manual"

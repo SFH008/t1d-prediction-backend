@@ -154,6 +154,11 @@ class Patient(Base):
         back_populates="patient",
         cascade="all, delete-orphan"
     )
+    meal_dose_events = relationship(
+        "MealDoseEvent",
+        back_populates="patient",
+        cascade="all, delete-orphan"
+    )
     forecast_results = relationship(
         "ForecastResult",
         back_populates="patient",
@@ -210,15 +215,19 @@ class InsulinEvent(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
     insulin_type = Column(String(50), nullable=False)  # 'basal', 'bolus', 'rewind', etc.
-    dose_units = Column(Numeric(8, 2), nullable=False)
+    dose_units = Column(Numeric(8, 3), nullable=False)
     timestamp = Column(DateTime, nullable=False, index=True)
     delivery_method = Column(String(50))  # 'pump', 'pen', 'manual'
     source = Column(String(100))  # 'medtronic_export', etc.
 
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationship
+    # Relationships
     patient = relationship("Patient", back_populates="insulin_events")
+    meal_dose_events = relationship(
+        "MealDoseEvent",
+        back_populates="insulin_event",
+    )
 
 
 class CarbIntake(Base):
@@ -315,6 +324,12 @@ class Meal(Base):
         "MealCalculation",
         back_populates="meal",
         cascade="all, delete-orphan",
+    )
+    dose_events = relationship(
+        "MealDoseEvent",
+        back_populates="meal",
+        cascade="all, delete-orphan",
+        order_by="MealDoseEvent.dose_number",
     )
 
 
@@ -457,6 +472,79 @@ class MealCalculation(Base):
     meal = relationship(
         "Meal",
         back_populates="calculations"
+    )
+    dose_events = relationship(
+        "MealDoseEvent",
+        back_populates="calculation",
+        cascade="all, delete-orphan",
+        order_by="MealDoseEvent.dose_number",
+    )
+
+
+class MealDoseEvent(Base):
+    """Planned versus actual execution of one split-dose component."""
+    __tablename__ = "meal_dose_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    meal_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    calculation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meal_calculations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # 1 = meal-time dose, 2 = delayed dose.
+    dose_number = Column(Integer, nullable=False)
+
+    planned_timestamp = Column(DateTime, nullable=False)
+    planned_units = Column(Numeric(8, 3), nullable=False)
+
+    actual_timestamp = Column(DateTime)
+    actual_units = Column(Numeric(8, 3))
+
+    # planned | given | adjusted | skipped | cancelled
+    status = Column(String(30), nullable=False, default="planned")
+    adjustment_reason = Column(String(100))
+    notes = Column(Text)
+
+    # Canonical insulin history entry created/linked when insulin is actually
+    # administered. Keeping this nullable preserves skipped/cancelled events.
+    insulin_event_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("insulin_events.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    patient = relationship("Patient", back_populates="meal_dose_events")
+    meal = relationship("Meal", back_populates="dose_events")
+    calculation = relationship("MealCalculation", back_populates="dose_events")
+    insulin_event = relationship("InsulinEvent", back_populates="meal_dose_events")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "calculation_id",
+            "dose_number",
+            name="uq_meal_dose_event",
+        ),
     )
 
 

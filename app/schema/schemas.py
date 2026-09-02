@@ -391,6 +391,119 @@ class MealCalculationResponse(BaseModel):
 
 
 # ============================================================================
+# Frontend Meal Plan Read Schemas
+# ============================================================================
+
+class MealPlanMealResponse(BaseModel):
+    """Meal metadata needed by the frontend plan screen."""
+    id: UUID
+    patient_id: UUID
+    meal_timestamp: datetime
+    meal_category: str
+    total_carbs_grams: float
+    absorption_profile_key: Optional[str] = None
+    absorption_classification_source: Optional[str] = None
+
+
+class MealPlanCalculationResponse(BaseModel):
+    """Calculation fields that explain the split-dose plan."""
+    id: UUID
+    calculation_version: str
+    calculated_at: datetime
+
+    glucose_mg_dl: Optional[float] = None
+    target_glucose_mg_dl: Optional[float] = None
+    meal_icr_g_per_unit: Optional[float] = None
+    meal_isf_mg_dl_per_unit: Optional[float] = None
+    meal_basal_drift_mg_dl_per_hour: Optional[float] = None
+
+    dose_2_icr_g_per_unit: Optional[float] = None
+    dose_2_isf_mg_dl_per_unit: Optional[float] = None
+    dose_2_basal_drift_mg_dl_per_hour: Optional[float] = None
+
+    dose_1_share_percent: Optional[float] = None
+    dose_2_share_percent: Optional[float] = None
+    dose_2_delay_minutes: Optional[int] = None
+    dose_2_timestamp: Optional[datetime] = None
+
+    dose_1_units: Optional[float] = None
+    dose_2_units: Optional[float] = None
+    total_planned_dose_units: Optional[float] = None
+
+    strategy_source: Optional[str] = None
+    strategy_version: Optional[str] = None
+
+
+class MealPlanAbsorptionResponse(BaseModel):
+    """Absorption assumptions snapshotted into the calculation."""
+    profile_key: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    delay_minutes: Optional[int] = None
+    classification_source: Optional[str] = None
+
+
+# ============================================================================
+# Multi-Dose Tracker Schemas
+# ============================================================================
+
+class MealDoseEventResponse(BaseModel):
+    """Planned and actual state for one component of a split-dose plan."""
+    id: UUID
+    patient_id: UUID
+    meal_id: UUID
+    calculation_id: UUID
+    dose_number: int
+
+    planned_timestamp: datetime
+    planned_units: float
+
+    actual_timestamp: Optional[datetime] = None
+    actual_units: Optional[float] = None
+    status: str
+
+    adjustment_reason: Optional[str] = None
+    notes: Optional[str] = None
+    insulin_event_id: Optional[UUID] = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MealPlanResponse(BaseModel):
+    """Consolidated immutable plan read model for React."""
+    meal: MealPlanMealResponse
+    calculation: MealPlanCalculationResponse
+    absorption: MealPlanAbsorptionResponse
+    dose_events: List[MealDoseEventResponse]
+
+
+class MealDoseEventConfirm(BaseModel):
+    """Confirm that a planned dose was administered as planned."""
+    actual_units: float = Field(..., gt=0, le=100)
+    actual_timestamp: datetime
+    delivery_method: Optional[str] = "pump"
+    notes: Optional[str] = None
+
+
+class MealDoseEventAdjust(BaseModel):
+    """Record an administered dose that differs from the planned dose."""
+    actual_units: float = Field(..., gt=0, le=100)
+    actual_timestamp: datetime
+    adjustment_reason: str = Field(..., min_length=1, max_length=100)
+    delivery_method: Optional[str] = "pump"
+    notes: Optional[str] = None
+
+
+class MealDoseEventSkip(BaseModel):
+    """Record that a planned dose was deliberately not administered."""
+    adjustment_reason: str = Field(..., min_length=1, max_length=100)
+    notes: Optional[str] = None
+
+
+# ============================================================================
 # Activity Schemas
 # ============================================================================
 

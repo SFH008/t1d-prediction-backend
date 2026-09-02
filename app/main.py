@@ -18,6 +18,8 @@ from app.api import (
     imports,
     carbs,
     calculations,
+    dose_events,
+    meal_plans,
     meals,
     activities,
     hormonal,
@@ -74,6 +76,8 @@ app.include_router(therapy_limits.router)
 app.include_router(imports.router)
 app.include_router(carbs.router)
 app.include_router(calculations.router)
+app.include_router(dose_events.router)
+app.include_router(meal_plans.router)
 app.include_router(meals.router)
 app.include_router(activities.router)
 app.include_router(hormonal.router)
