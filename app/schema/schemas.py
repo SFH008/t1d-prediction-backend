@@ -324,12 +324,13 @@ class CarbIntakeResponse(CarbIntakeCreate):
 # ============================================================================
 
 class MealCalculationCreate(BaseModel):
-    """Inputs supplied by the client for a meal calculation."""
+    """Client inputs for calculation version 3."""
     glucose_mg_dl: Optional[float] = Field(None, ge=20, le=600)
+    manual_insulin_given_units: Optional[float] = Field(None, ge=0, le=100)
 
 
 class MealCalculationResponse(BaseModel):
-    """Calculation result and immutable input/rule snapshot."""
+    """Calculation result and immutable therapy/strategy snapshot."""
     id: UUID
     meal_id: UUID
     patient_id: UUID
@@ -344,6 +345,43 @@ class MealCalculationResponse(BaseModel):
     carbohydrate_dose_units: Optional[float]
     correction_dose_units: Optional[float]
     calculated_dose_units: Optional[float]
+
+    meal_therapy_profile_id: Optional[UUID] = None
+    meal_basal_drift_mg_dl_per_hour: Optional[float] = None
+
+    base_carbohydrate_grams: Optional[float] = None
+    fat_protein_addon_percent: Optional[float] = None
+    fat_protein_addon_grams: Optional[float] = None
+    effective_carbohydrate_grams: Optional[float] = None
+
+    absorption_profile_id: Optional[UUID] = None
+    absorption_profile_key: Optional[str] = None
+    absorption_duration_minutes: Optional[int] = None
+    absorption_delay_minutes: Optional[int] = None
+    absorption_classification_source: Optional[str] = None
+
+    dose_1_share_percent: Optional[float] = None
+    dose_2_share_percent: Optional[float] = None
+    dose_2_delay_minutes: Optional[int] = None
+    dose_2_timestamp: Optional[datetime] = None
+    insulin_rounding_increment_units: Optional[float] = None
+    strategy_source: Optional[str] = None
+    strategy_version: Optional[str] = None
+
+    dose_2_therapy_profile_id: Optional[UUID] = None
+    dose_2_carb_factor_g_per_unit: Optional[float] = None
+    dose_2_insulin_sensitivity_mg_dl_per_unit: Optional[float] = None
+    dose_2_target_glucose_mg_dl: Optional[float] = None
+    dose_2_basal_drift_mg_dl_per_hour: Optional[float] = None
+
+    dose_1_carbohydrate_grams: Optional[float] = None
+    dose_2_carbohydrate_grams: Optional[float] = None
+    dose_1_carbohydrate_units: Optional[float] = None
+    dose_1_units: Optional[float] = None
+    dose_2_carbohydrate_units: Optional[float] = None
+    dose_2_units: Optional[float] = None
+    total_planned_dose_units: Optional[float] = None
+    manual_insulin_given_units: Optional[float] = None
 
     calculation_version: str
     notes: Optional[str]

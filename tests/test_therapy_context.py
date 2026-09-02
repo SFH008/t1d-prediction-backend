@@ -23,6 +23,7 @@ def profile(
     day_of_week=None,
     active=True,
     created_at=None,
+    basal_drift=0,
 ):
     return SimpleNamespace(
         id=uuid4(),
@@ -31,6 +32,7 @@ def profile(
         time_period_end=end,
         insulin_sensitivity_mg_dl_per_unit=Decimal(str(isf)),
         insulin_to_carb_ratio=Decimal(str(icr)),
+        basal_drift_mg_dl_per_hour=Decimal(str(basal_drift)),
         target_glucose_min_mg_dl=(
             None if target_min is None else Decimal(str(target_min))
         ),
@@ -261,3 +263,60 @@ def test_decimal_values_are_preserved():
     assert context.carb_factor_g_per_unit == Decimal("9.75")
     assert context.insulin_sensitivity_mg_dl_per_unit == Decimal("42.50")
     assert context.target_glucose_mg_dl == Decimal("100.00")
+
+def test_real_patient_band_boundaries_are_start_inclusive_end_exclusive():
+    target = therapy_limit(lower=100, upper=100)
+    bands = [
+        profile(name="00:00", start="00:00", end="04:30", isf=200, icr=18, target_min=None, target_max=None),
+        profile(name="04:30", start="04:30", end="09:00", isf=120, icr=12, target_min=None, target_max=None),
+        profile(name="09:00", start="09:00", end="10:00", isf=150, icr=16, target_min=None, target_max=None),
+        profile(name="10:00", start="10:00", end="11:30", isf=150, icr=16, target_min=None, target_max=None),
+        profile(name="11:30", start="11:30", end="14:00", isf=120, icr=12, target_min=None, target_max=None),
+        profile(name="14:00", start="14:00", end="16:30", isf=200, icr=18, target_min=None, target_max=None),
+        profile(name="16:30", start="16:30", end="19:00", isf=150, icr=16, target_min=None, target_max=None),
+        profile(name="19:00", start="19:00", end="21:00", isf=120, icr=12, target_min=None, target_max=None),
+        profile(name="21:00", start="21:00", end="00:00", isf=150, icr=12, target_min=None, target_max=None),
+    ]
+
+    cases = [
+        (datetime(2026, 9, 2, 4, 29), Decimal("18"), Decimal("200")),
+        (datetime(2026, 9, 2, 4, 30), Decimal("12"), Decimal("120")),
+        (datetime(2026, 9, 2, 11, 29), Decimal("16"), Decimal("150")),
+        (datetime(2026, 9, 2, 11, 30), Decimal("12"), Decimal("120")),
+        (datetime(2026, 9, 2, 20, 59), Decimal("12"), Decimal("120")),
+        (datetime(2026, 9, 2, 21, 0), Decimal("12"), Decimal("150")),
+        (datetime(2026, 9, 2, 23, 59), Decimal("12"), Decimal("150")),
+        (datetime(2026, 9, 3, 0, 0), Decimal("18"), Decimal("200")),
+    ]
+
+    for timestamp, expected_icr, expected_isf in cases:
+        context = resolve_therapy_context(
+            meal_timestamp=timestamp,
+            time_of_day_profiles=bands,
+            therapy_limits=[target],
+        )
+        assert context.carb_factor_g_per_unit == expected_icr
+        assert context.insulin_sensitivity_mg_dl_per_unit == expected_isf
+        assert context.target_glucose_mg_dl == Decimal("100")
+
+
+def test_therapy_context_includes_basal_drift_and_profile_id():
+    item = profile(
+        start="19:00",
+        end="21:00",
+        isf=120,
+        icr=12,
+        target_min=None,
+        target_max=None,
+        basal_drift="20",
+    )
+    target = therapy_limit(lower=100, upper=100)
+
+    context = resolve_therapy_context(
+        meal_timestamp=datetime(2026, 9, 2, 20, 0),
+        time_of_day_profiles=[item],
+        therapy_limits=[target],
+    )
+
+    assert context.basal_drift_mg_dl_per_hour == Decimal("20")
+    assert context.profile_id == item.id

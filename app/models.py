@@ -21,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from decimal import Decimal
 import uuid
 
 from app.database import Base
@@ -139,6 +140,17 @@ class Patient(Base):
     )
     time_of_day_profiles = relationship(
         "TimeOfDayProfile",
+        back_populates="patient",
+        cascade="all, delete-orphan"
+    )
+    dose_strategy_settings = relationship(
+        "DoseStrategySettings",
+        back_populates="patient",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+    carb_absorption_profiles = relationship(
+        "CarbAbsorptionProfile",
         back_populates="patient",
         cascade="all, delete-orphan"
     )
@@ -269,6 +281,18 @@ class Meal(Base):
     # Snapshot of the calculated total at capture time.
     total_carbs_grams = Column(Numeric(8, 1), nullable=False, default=0)
 
+    # Meal-derived absorption classification. The profile link points to the
+    # current patient configuration, while key/source preserve readable event
+    # context. Calculation snapshots remain immutable even if profiles change.
+    absorption_profile_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("carb_absorption_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    absorption_profile_key = Column(String(50))
+    absorption_classification_source = Column(String(50))
+    fat_protein_addon_percent = Column(Numeric(5, 2))
+
     source = Column(String(50), nullable=False, default="manual")
     notes = Column(Text)
 
@@ -286,6 +310,7 @@ class Meal(Base):
         cascade="all, delete-orphan",
         order_by="MealCarbGroup.group_number"
     )
+    absorption_profile = relationship("CarbAbsorptionProfile")
     calculations = relationship(
         "MealCalculation",
         back_populates="meal",
@@ -379,6 +404,45 @@ class MealCalculation(Base):
     correction_dose_units = Column(Numeric(8, 2))
     calculated_dose_units = Column(Numeric(8, 2))
 
+    # Step 3 immutable therapy/carb/strategy snapshot. These fields are
+    # intentionally additive so calculation version 2 remains readable.
+    meal_therapy_profile_id = Column(UUID(as_uuid=True))
+    meal_basal_drift_mg_dl_per_hour = Column(Numeric(8, 2))
+
+    base_carbohydrate_grams = Column(Numeric(8, 1))
+    fat_protein_addon_percent = Column(Numeric(5, 2))
+    fat_protein_addon_grams = Column(Numeric(8, 1))
+    effective_carbohydrate_grams = Column(Numeric(8, 1))
+
+    absorption_profile_id = Column(UUID(as_uuid=True))
+    absorption_profile_key = Column(String(50))
+    absorption_duration_minutes = Column(Integer)
+    absorption_delay_minutes = Column(Integer)
+    absorption_classification_source = Column(String(50))
+
+    dose_1_share_percent = Column(Numeric(5, 2))
+    dose_2_share_percent = Column(Numeric(5, 2))
+    dose_2_delay_minutes = Column(Integer)
+    dose_2_timestamp = Column(DateTime)
+    insulin_rounding_increment_units = Column(Numeric(6, 3))
+    strategy_source = Column(String(50))
+    strategy_version = Column(String(100))
+
+    dose_2_therapy_profile_id = Column(UUID(as_uuid=True))
+    dose_2_carb_factor_g_per_unit = Column(Numeric(8, 3))
+    dose_2_insulin_sensitivity_mg_dl_per_unit = Column(Numeric(8, 2))
+    dose_2_target_glucose_mg_dl = Column(Numeric(6, 2))
+    dose_2_basal_drift_mg_dl_per_hour = Column(Numeric(8, 2))
+
+    dose_1_carbohydrate_grams = Column(Numeric(8, 1))
+    dose_2_carbohydrate_grams = Column(Numeric(8, 1))
+    dose_1_carbohydrate_units = Column(Numeric(8, 3))
+    dose_1_units = Column(Numeric(8, 3))
+    dose_2_carbohydrate_units = Column(Numeric(8, 3))
+    dose_2_units = Column(Numeric(8, 3))
+    total_planned_dose_units = Column(Numeric(8, 3))
+    manual_insulin_given_units = Column(Numeric(8, 3))
+
     calculation_version = Column(
         String(50),
         nullable=False,
@@ -461,6 +525,77 @@ class TherapyLimit(Base):
     patient = relationship("Patient", back_populates="therapy_limits")
 
 
+class DoseStrategySettings(Base):
+    """Patient-specific split-dose strategy and optimization bounds."""
+    __tablename__ = "dose_strategy_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    dose_1_share_percent = Column(Numeric(5, 2), nullable=False, default=60)
+    dose_2_delay_minutes = Column(Integer, nullable=False, default=75)
+    insulin_rounding_increment_units = Column(
+        Numeric(6, 3),
+        nullable=False,
+        default=Decimal("0.05"),
+    )
+    fat_protein_addon_percent = Column(Numeric(5, 2), nullable=False, default=0)
+
+    total_daily_dose_units = Column(Numeric(8, 2))
+    basal_share_percent = Column(Numeric(5, 2))
+
+    strategy_source = Column(String(50), nullable=False, default="manual")
+    strategy_version = Column(String(100))
+
+    min_dose_1_share_percent = Column(Numeric(5, 2))
+    max_dose_1_share_percent = Column(Numeric(5, 2))
+    min_dose_2_delay_minutes = Column(Integer)
+    max_dose_2_delay_minutes = Column(Integer)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    patient = relationship("Patient", back_populates="dose_strategy_settings")
+
+
+class CarbAbsorptionProfile(Base):
+    """Patient-specific carbohydrate absorption profile definition."""
+    __tablename__ = "carb_absorption_profiles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    profile_key = Column(String(50), nullable=False)
+    profile_name = Column(String(100), nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    absorption_delay_minutes = Column(Integer, nullable=False, default=10)
+    description = Column(Text)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    patient = relationship("Patient", back_populates="carb_absorption_profiles")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "patient_id",
+            "profile_key",
+            name="uq_carb_absorption_patient_key",
+        ),
+    )
+
+
 class UserSettings(Base):
     """User-configurable settings."""
     __tablename__ = "user_settings"
@@ -508,10 +643,11 @@ class TimeOfDayProfile(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
     profile_name = Column(String(100))
-    time_period_start = Column(String(5), nullable=False)  # HH:MM
-    time_period_end = Column(String(5), nullable=False)    # HH:MM
+    time_period_start = Column(Time, nullable=False)
+    time_period_end = Column(Time, nullable=False)
     insulin_sensitivity_mg_dl_per_unit = Column(Numeric(8, 2), nullable=False)
     insulin_to_carb_ratio = Column(Numeric(8, 2), nullable=False)
+    basal_drift_mg_dl_per_hour = Column(Numeric(8, 2), nullable=False, default=0)
     target_glucose_min_mg_dl = Column(Numeric(6, 2))
     target_glucose_max_mg_dl = Column(Numeric(6, 2))
     day_of_week = Column(Integer)  # 0=Sun, 6=Sat, NULL=all days

@@ -19,6 +19,8 @@ class TherapyContext:
     carb_factor_g_per_unit: Decimal
     insulin_sensitivity_mg_dl_per_unit: Decimal
     target_glucose_mg_dl: Decimal
+    basal_drift_mg_dl_per_hour: Decimal
+    profile_id: object
     source: str
 
 
@@ -282,10 +284,18 @@ def resolve_therapy_context(
             f"{meal_timestamp.isoformat()}"
         )
 
+    basal_drift = _as_decimal(
+        getattr(profile, "basal_drift_mg_dl_per_hour", 0)
+    )
+    if basal_drift is None:
+        basal_drift = Decimal("0")
+
     return TherapyContext(
         carb_factor_g_per_unit=icr,
         insulin_sensitivity_mg_dl_per_unit=isf,
         target_glucose_mg_dl=target,
+        basal_drift_mg_dl_per_hour=basal_drift,
+        profile_id=getattr(profile, "id", None),
         source=(
             f"time_of_day_profile:{profile.id}:"
             f"target={target_source}"

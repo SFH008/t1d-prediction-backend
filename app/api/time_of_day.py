@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from uuid import UUID
 from decimal import Decimal
+from datetime import time
 import logging
 
 from app.database import get_db
@@ -78,8 +79,8 @@ async def create_time_of_day_profile(
     profile = TimeOfDayProfile(
         patient_id=patient_id,
         profile_name=profile_create.profile_name,
-        time_period_start=profile_create.time_period_start,
-        time_period_end=profile_create.time_period_end,
+        time_period_start=time.fromisoformat(profile_create.time_period_start),
+        time_period_end=time.fromisoformat(profile_create.time_period_end),
         insulin_sensitivity_mg_dl_per_unit=Decimal(str(profile_create.insulin_sensitivity_mg_dl_per_unit)),
         insulin_to_carb_ratio=Decimal(str(profile_create.insulin_to_carb_ratio)),
         target_glucose_min_mg_dl=Decimal(str(profile_create.target_glucose_min_mg_dl)) if profile_create.target_glucose_min_mg_dl else None,
@@ -93,7 +94,30 @@ async def create_time_of_day_profile(
     await db.refresh(profile)
 
     logger.info(f"✅ Created time-of-day profile: {profile.id} ({profile_create.profile_name})")
-    return profile
+
+    return TimeOfDayProfileResponse(
+        id=profile.id,
+        patient_id=profile.patient_id,
+        profile_name=profile.profile_name,
+        time_period_start=profile.time_period_start.strftime("%H:%M"),
+        time_period_end=profile.time_period_end.strftime("%H:%M"),
+        insulin_sensitivity_mg_dl_per_unit=float(profile.insulin_sensitivity_mg_dl_per_unit),
+        insulin_to_carb_ratio=float(profile.insulin_to_carb_ratio),
+        target_glucose_min_mg_dl=(
+            float(profile.target_glucose_min_mg_dl)
+            if profile.target_glucose_min_mg_dl is not None
+            else None
+        ),
+        target_glucose_max_mg_dl=(
+            float(profile.target_glucose_max_mg_dl)
+            if profile.target_glucose_max_mg_dl is not None
+            else None
+        ),
+        day_of_week=profile.day_of_week,
+        is_active=profile.is_active,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
 
 
 @router.get("/patients/{patient_id}/time-of-day-profiles", response_model=list[TimeOfDayProfileResponse])
