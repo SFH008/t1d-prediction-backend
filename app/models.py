@@ -298,6 +298,11 @@ class CarbGroupDefinition(Base):
         nullable=False,
     )
 
+    default_absorption_profile_key = Column(
+        String(50),
+        nullable=True,
+    )
+
     is_active = Column(
         Boolean,
         nullable=False,
@@ -326,6 +331,12 @@ class CarbGroupDefinition(Base):
             "carb_factor_g_per_g >= 0 "
             "AND carb_factor_g_per_g <= 1",
             name="ck_carb_group_definitions_factor",
+        ),
+        CheckConstraint(
+            "default_absorption_profile_key IS NULL "
+            "OR default_absorption_profile_key IN "
+            "('very_fast', 'fast', 'medium', 'slow')",
+            name="ck_carb_group_definitions_absorption_profile",
         ),
     )
 
@@ -454,6 +465,100 @@ class MealCarbGroup(Base):
             "meal_id",
             "group_number",
             name="uq_meal_carb_group_number"
+        ),
+    )
+
+
+class MealComponentAbsorption(Base):
+    """
+    Immutable absorption assumptions for one meal carbohydrate component.
+
+    The row snapshots the patient-specific absorption profile and deterministic
+    curve configuration used for this meal component.
+    """
+
+    __tablename__ = "meal_component_absorptions"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    meal_carb_group_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meal_carb_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    absorption_profile_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("carb_absorption_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    absorption_profile_key = Column(
+        String(50),
+        nullable=False,
+    )
+
+    absorption_delay_minutes = Column(
+        Integer,
+        nullable=False,
+    )
+
+    absorption_duration_minutes = Column(
+        Integer,
+        nullable=False,
+    )
+
+    curve_type = Column(
+        String(50),
+        nullable=False,
+        default="linear",
+    )
+
+    curve_parameters = Column(JSON)
+
+    classification_source = Column(
+        String(100),
+        nullable=False,
+        default="carb_group_default_v1",
+    )
+
+    model_version = Column(
+        String(100),
+        nullable=False,
+        default="deterministic_linear_v1",
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    meal_carb_group = relationship("MealCarbGroup")
+    patient = relationship("Patient")
+    absorption_profile = relationship("CarbAbsorptionProfile")
+
+    __table_args__ = (
+        CheckConstraint(
+            "absorption_delay_minutes >= 0",
+            name="ck_meal_component_absorptions_delay",
+        ),
+        CheckConstraint(
+            "absorption_duration_minutes > 0",
+            name="ck_meal_component_absorptions_duration",
         ),
     )
 
@@ -874,6 +979,179 @@ class ForecastPrediction(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class PatientAbsorptionHistory(Base):
+    """Derived historical 5-minute patient absorption estimate."""
+
+    __tablename__ = "patient_absorption_history"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    interval_start = Column(DateTime, nullable=False)
+    interval_end = Column(DateTime, nullable=False)
+
+    base_absorbed_carbs_grams = Column(
+        Numeric(12, 6),
+        nullable=False,
+    )
+
+    hormonal_multiplier = Column(
+        Numeric(10, 5),
+        nullable=False,
+        default=Decimal("1.0"),
+    )
+
+    activity_multiplier = Column(
+        Numeric(10, 5),
+        nullable=False,
+        default=Decimal("1.0"),
+    )
+
+    adjusted_absorbed_carbs_grams = Column(
+        Numeric(12, 6),
+        nullable=False,
+    )
+
+    component_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    derivation_model = Column(
+        String(100),
+        nullable=False,
+        default="deterministic_linear",
+    )
+
+    derivation_version = Column(
+        String(100),
+        nullable=False,
+        default="deterministic_linear_v1",
+    )
+
+    derivation_mode = Column(
+        String(50),
+        nullable=False,
+        default="original",
+    )
+
+    derived_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    patient = relationship("Patient")
+
+
+class PatientAbsorptionForecast(Base):
+    """Current rolling 5-minute patient absorption forecast."""
+
+    __tablename__ = "patient_absorption_forecasts"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    forecast_anchor_timestamp = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    forecast_grid_start = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    interval_start = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    interval_end = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    base_absorbed_carbs_grams = Column(
+        Numeric(12, 6),
+        nullable=False,
+    )
+
+    hormonal_multiplier = Column(
+        Numeric(10, 5),
+        nullable=False,
+        default=Decimal("1.0"),
+    )
+
+    activity_multiplier = Column(
+        Numeric(10, 5),
+        nullable=False,
+        default=Decimal("1.0"),
+    )
+
+    adjusted_absorbed_carbs_grams = Column(
+        Numeric(12, 6),
+        nullable=False,
+    )
+
+    component_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    deterministic_model_version = Column(
+        String(100),
+        nullable=False,
+        default="deterministic_linear_v1",
+    )
+
+    ml_model_version = Column(String(100))
+
+    ml_predicted_absorbed_carbs_grams = Column(
+        Numeric(12, 6)
+    )
+
+    ml_lower_bound_grams = Column(
+        Numeric(12, 6)
+    )
+
+    ml_upper_bound_grams = Column(
+        Numeric(12, 6)
+    )
+
+    ml_confidence = Column(
+        Numeric(8, 6)
+    )
+
+    forecast_generated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    patient = relationship("Patient")
 
 class ModelTrainingLog(Base):
     """Model training metadata and performance metrics."""

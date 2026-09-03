@@ -20,9 +20,11 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models import (
+    CarbAbsorptionProfile,
     CarbGroupDefinition,
     Meal,
     MealCarbGroup,
+    MealComponentAbsorption,
     Patient,
 )
 from app.schema.schemas import (
@@ -162,6 +164,78 @@ async def create_meal(
     )
 
     db.add(meal)
+
+    # Allocate database identities without committing. This allows each
+    # component absorption snapshot to reference its MealCarbGroup while
+    # keeping the complete meal capture atomic.
+    await db.flush()
+
+    for meal_group in meal.carb_groups:
+        definition_stmt = select(
+            CarbGroupDefinition
+        ).where(
+            CarbGroupDefinition.group_number == meal_group.group_number,
+            CarbGroupDefinition.is_active.is_(True),
+        )
+
+        definition_result = await db.execute(definition_stmt)
+        definition = definition_result.scalar_one_or_none()
+
+        if definition is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No active carbohydrate definition "
+                    f"exists for group {meal_group.group_number}"
+                ),
+            )
+
+        profile_key = definition.default_absorption_profile_key
+
+        if profile_key is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No default absorption profile is configured "
+                    f"for carbohydrate group {meal_group.group_number}"
+                ),
+            )
+
+        profile_stmt = select(
+            CarbAbsorptionProfile
+        ).where(
+            CarbAbsorptionProfile.patient_id == patient_id,
+            CarbAbsorptionProfile.profile_key == profile_key,
+            CarbAbsorptionProfile.is_active.is_(True),
+        )
+
+        profile_result = await db.execute(profile_stmt)
+        profile = profile_result.scalar_one_or_none()
+
+        if profile is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No active '{profile_key}' carbohydrate absorption "
+                    "profile exists for this patient"
+                ),
+            )
+
+        component_absorption = MealComponentAbsorption(
+            meal_carb_group_id=meal_group.id,
+            patient_id=patient_id,
+            absorption_profile_id=profile.id,
+            absorption_profile_key=profile.profile_key,
+            absorption_delay_minutes=profile.absorption_delay_minutes,
+            absorption_duration_minutes=profile.duration_minutes,
+            curve_type="linear",
+            curve_parameters=None,
+            classification_source="carb_group_default_v1",
+            model_version="deterministic_linear_v1",
+        )
+
+        db.add(component_absorption)
+
     await db.commit()
 
     # Reload children explicitly because the relationship is async-session

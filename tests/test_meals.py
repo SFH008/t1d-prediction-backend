@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.api.calculations import calculate_meal_dose
 from app.api.meals import calculate_group_carbs, create_meal
-from app.models import CarbGroupDefinition
+from app.models import CarbAbsorptionProfile, CarbGroupDefinition
 from app.schema.schemas import MealCreate
 
 def test_carb_factor_calculation():
@@ -163,9 +163,10 @@ class _ScalarResult:
 
 
 class _MealCreateSession:
-    def __init__(self, patient, definition):
+    def __init__(self, patient, definition, profile):
         self.patient = patient
         self.definition = definition
+        self.profile = profile
         self.added = []
         self.commit_called = False
         self.execute_count = 0
@@ -176,10 +177,13 @@ class _MealCreateSession:
         if self.execute_count == 1:
             return _ScalarResult(self.patient)
 
-        if self.execute_count == 2:
+        if self.execute_count in (2, 3):
             return _ScalarResult(self.definition)
 
-        if self.execute_count == 3:
+        if self.execute_count == 4:
+            return _ScalarResult(self.profile)
+
+        if self.execute_count == 5:
             return _ScalarResult(self.added[0])
 
         raise AssertionError(
@@ -191,6 +195,15 @@ class _MealCreateSession:
 
     async def commit(self):
         self.commit_called = True
+
+    async def flush(self):
+        for item in self.added:
+            if getattr(item, "id", None) is None:
+                item.id = uuid4()
+
+            for group in getattr(item, "carb_groups", []):
+                if getattr(group, "id", None) is None:
+                    group.id = uuid4()
 
 
 @pytest.mark.asyncio
@@ -207,12 +220,24 @@ async def test_create_meal_uses_backend_carb_definition():
         group_key="pasta_cooked",
         group_name="Pasta, cooked",
         carb_factor_g_per_g=Decimal("0.28"),
+        default_absorption_profile_key="slow",
+        is_active=True,
+    )
+
+    profile = CarbAbsorptionProfile(
+        id=uuid4(),
+        patient_id=patient_id,
+        profile_key="slow",
+        profile_name="Slow",
+        duration_minutes=300,
+        absorption_delay_minutes=10,
         is_active=True,
     )
 
     session = _MealCreateSession(
         patient=patient,
         definition=definition,
+        profile=profile,
     )
 
     meal_create = MealCreate(
@@ -233,9 +258,21 @@ async def test_create_meal_uses_backend_carb_definition():
     )
 
     assert session.commit_called is True
-    assert len(session.added) == 1
+    assert len(session.added) == 2
 
     stored_group = meal.carb_groups[0]
+
+    component_absorption = session.added[1]
+
+    assert component_absorption.meal_carb_group_id == stored_group.id
+    assert component_absorption.patient_id == patient_id
+    assert component_absorption.absorption_profile_id == profile.id
+    assert component_absorption.absorption_profile_key == "slow"
+    assert component_absorption.absorption_delay_minutes == 10
+    assert component_absorption.absorption_duration_minutes == 300
+    assert component_absorption.curve_type == "linear"
+    assert component_absorption.classification_source == "carb_group_default_v1"
+    assert component_absorption.model_version == "deterministic_linear_v1"
 
     assert stored_group.group_number == 1
     assert stored_group.group_key == "pasta_cooked"
@@ -259,12 +296,24 @@ async def test_existing_meal_keeps_factor_snapshot_after_admin_change():
         group_key="pasta_cooked",
         group_name="Pasta, cooked",
         carb_factor_g_per_g=Decimal("0.28"),
+        default_absorption_profile_key="slow",
+        is_active=True,
+    )
+
+    profile = CarbAbsorptionProfile(
+        id=uuid4(),
+        patient_id=patient_id,
+        profile_key="slow",
+        profile_name="Slow",
+        duration_minutes=300,
+        absorption_delay_minutes=10,
         is_active=True,
     )
 
     session = _MealCreateSession(
         patient=patient,
         definition=definition,
+        profile=profile,
     )
 
     meal_create = MealCreate(
@@ -286,9 +335,22 @@ async def test_existing_meal_keeps_factor_snapshot_after_admin_change():
 
     stored_group = meal.carb_groups[0]
 
-    # Simulate a later system-admin configuration change.
+    component_absorption = session.added[1]
+
+    # Simulate later admin configuration changes.
     definition.carb_factor_g_per_g = Decimal("0.40")
+    definition.default_absorption_profile_key = "fast"
+
+    profile.absorption_delay_minutes = 5
+    profile.duration_minutes = 60
 
     assert stored_group.carb_factor_g_per_g == Decimal("0.28")
     assert stored_group.carbs_grams == Decimal("28.0")
     assert meal.total_carbs_grams == Decimal("28.0")
+
+    assert component_absorption.absorption_profile_key == "slow"
+    assert component_absorption.absorption_delay_minutes == 10
+    assert component_absorption.absorption_duration_minutes == 300
+    assert component_absorption.absorption_profile_id == profile.id
+    assert component_absorption.curve_type == "linear"
+    assert component_absorption.model_version == "deterministic_linear_v1"

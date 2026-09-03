@@ -250,6 +250,38 @@ class MealCarbGroupCreate(BaseModel):
     group_number: int = Field(..., ge=1, le=12)
     quantity_grams: float = Field(..., gt=0, le=5000)
 
+class CarbGroupDefinitionUpdate(BaseModel):
+    """
+    Admin-managed updates for a canonical carbohydrate group.
+    """
+
+    carb_factor_g_per_g: Optional[float] = Field(
+        None,
+        ge=0,
+        le=1,
+    )
+
+    default_absorption_profile_key: Optional[str] = Field(
+        None,
+        pattern=r"^(very_fast|fast|medium|slow)$",
+    )
+
+    is_active: Optional[bool] = None
+
+
+class CarbGroupDefinitionResponse(BaseModel):
+    id: UUID
+    group_number: int
+    group_key: str
+    group_name: str
+    carb_factor_g_per_g: float
+    default_absorption_profile_key: Optional[str]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class MealCarbGroupResponse(BaseModel):
     id: UUID
@@ -279,15 +311,6 @@ class MealCreate(BaseModel):
     )
     source: Optional[str] = "manual"
     notes: Optional[str] = None
-
-
-class MealCarbGroupResponse(MealCarbGroupCreate):
-    id: UUID
-    carbs_grams: float
-
-    class Config:
-        from_attributes = True
-
 
 class MealResponse(BaseModel):
     id: UUID

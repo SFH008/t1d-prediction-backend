@@ -23,6 +23,7 @@ from app.api import (
     meals,
     activities,
     hormonal,
+    carb_group_definitions,
     settings as settings_router,
     time_of_day,
 )
@@ -75,6 +76,7 @@ app.include_router(insulin.router)
 app.include_router(therapy_limits.router)
 app.include_router(imports.router)
 app.include_router(carbs.router)
+app.include_router(carb_group_definitions.router)
 app.include_router(calculations.router)
 app.include_router(dose_events.router)
 app.include_router(meal_plans.router)
@@ -83,6 +85,7 @@ app.include_router(activities.router)
 app.include_router(hormonal.router)
 app.include_router(settings_router.router)
 app.include_router(time_of_day.router)
+
 
 
 # Root endpoint
