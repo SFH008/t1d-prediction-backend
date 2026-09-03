@@ -21,6 +21,7 @@ from app.api import (
     dose_events,
     meal_plans,
     meals,
+    absorption,
     activities,
     hormonal,
     carb_group_definitions,
@@ -85,6 +86,7 @@ app.include_router(activities.router)
 app.include_router(hormonal.router)
 app.include_router(settings_router.router)
 app.include_router(time_of_day.router)
+app.include_router(absorption.router)
 
 
 

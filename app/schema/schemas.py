@@ -673,3 +673,54 @@ class DatabaseHealthResponse(BaseModel):
     database_url: str
     connection_time_ms: float
     timestamp: datetime
+
+class AbsorptionHistoryPointResponse(BaseModel):
+    interval_start: datetime
+    interval_end: datetime
+
+    base_absorbed_carbs_grams: float
+    hormonal_multiplier: float
+    activity_multiplier: float
+    adjusted_absorbed_carbs_grams: float
+    component_count: int
+
+    derivation_model: str
+    derivation_version: str
+    derivation_mode: str
+    derived_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AbsorptionForecastPointResponse(BaseModel):
+    forecast_anchor_timestamp: datetime
+    forecast_grid_start: datetime
+
+    interval_start: datetime
+    interval_end: datetime
+
+    base_absorbed_carbs_grams: float
+    hormonal_multiplier: float
+    activity_multiplier: float
+    adjusted_absorbed_carbs_grams: float
+    component_count: int
+
+    deterministic_model_version: str
+
+    ml_model_version: Optional[str] = None
+    ml_predicted_absorbed_carbs_grams: Optional[float] = None
+    ml_lower_bound_grams: Optional[float] = None
+    ml_upper_bound_grams: Optional[float] = None
+    ml_confidence: Optional[float] = None
+
+    forecast_generated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PatientAbsorptionTimelineResponse(BaseModel):
+    patient_id: UUID
+    history: List[AbsorptionHistoryPointResponse]
+    forecast: List[AbsorptionForecastPointResponse]

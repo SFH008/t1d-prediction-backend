@@ -485,7 +485,7 @@ async def test_persist_patient_absorption_timeline_commits_once():
     with (
         patch(
             "app.services.absorption_timeline.stage_absorption_history",
-            Mock(return_value=history_rows),
+            AsyncMock(return_value=history_rows),
         ) as stage_history,
         patch(
             "app.services.absorption_timeline.stage_current_forecast",
@@ -498,7 +498,7 @@ async def test_persist_patient_absorption_timeline_commits_once():
             timeline=timeline,
         )
 
-    stage_history.assert_called_once()
+    stage_history.assert_awaited_once()
     stage_forecast.assert_awaited_once()
 
     db.commit.assert_awaited_once()
@@ -533,7 +533,7 @@ async def test_persist_patient_absorption_timeline_rolls_back_together():
     with (
         patch(
             "app.services.absorption_timeline.stage_absorption_history",
-            Mock(return_value=[]),
+            AsyncMock(return_value=[]),
         ),
         patch(
             "app.services.absorption_timeline.stage_current_forecast",
@@ -550,3 +550,96 @@ async def test_persist_patient_absorption_timeline_rolls_back_together():
     db.commit.assert_awaited_once()
     db.rollback.assert_awaited_once()
 
+@pytest.mark.asyncio
+async def test_rebuild_patient_absorption_timeline_builds_and_persists():
+    from app.services.absorption_timeline import (
+        rebuild_patient_absorption_timeline,
+    )
+
+    patient_id = uuid4()
+    anchor = datetime(2026, 9, 3, 12, 37)
+
+    db = SimpleNamespace()
+
+    built_timeline = SimpleNamespace(
+        anchor_timestamp=anchor,
+        history=[],
+        forecast=[],
+        forecast_start=datetime(2026, 9, 3, 12, 40),
+    )
+
+    persisted = SimpleNamespace(
+        history_rows=[SimpleNamespace()],
+        forecast_rows=[SimpleNamespace()],
+    )
+
+    with (
+        patch(
+            "app.services.absorption_timeline.build_patient_absorption_timeline",
+            AsyncMock(return_value=built_timeline),
+        ) as build_timeline,
+        patch(
+            "app.services.absorption_timeline.persist_patient_absorption_timeline",
+            AsyncMock(return_value=persisted),
+        ) as persist_timeline,
+    ):
+        result = await rebuild_patient_absorption_timeline(
+            db=db,
+            patient_id=patient_id,
+            anchor_timestamp=anchor,
+        )
+
+    build_timeline.assert_awaited_once_with(
+        db=db,
+        patient_id=patient_id,
+        anchor_timestamp=anchor,
+    )
+
+    persist_timeline.assert_awaited_once_with(
+        db=db,
+        patient_id=patient_id,
+        timeline=built_timeline,
+    )
+
+    assert result.timeline is built_timeline
+    assert result.persisted is persisted
+
+
+@pytest.mark.asyncio
+async def test_rebuild_patient_absorption_timeline_propagates_persistence_failure():
+    from app.services.absorption_timeline import (
+        rebuild_patient_absorption_timeline,
+    )
+
+    patient_id = uuid4()
+    anchor = datetime(2026, 9, 3, 12, 37)
+
+    db = SimpleNamespace()
+
+    built_timeline = SimpleNamespace(
+        anchor_timestamp=anchor,
+        history=[],
+        forecast=[],
+        forecast_start=datetime(2026, 9, 3, 12, 40),
+    )
+
+    with (
+        patch(
+            "app.services.absorption_timeline.build_patient_absorption_timeline",
+            AsyncMock(return_value=built_timeline),
+        ),
+        patch(
+            "app.services.absorption_timeline.persist_patient_absorption_timeline",
+            AsyncMock(
+                side_effect=SQLAlchemyError(
+                    "forced persistence failure"
+                )
+            ),
+        ),
+    ):
+        with pytest.raises(SQLAlchemyError):
+            await rebuild_patient_absorption_timeline(
+                db=db,
+                patient_id=patient_id,
+                anchor_timestamp=anchor,
+            )

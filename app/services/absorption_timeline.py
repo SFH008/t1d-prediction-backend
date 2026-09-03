@@ -1,15 +1,16 @@
 """
 Patient absorption timeline orchestration helpers.
 
-This module bridges immutable meal component absorption snapshots to the
-pure deterministic curve engine.
+This module bridges immutable meal-component absorption snapshots to the
+pure deterministic curve engine and coordinates persistence of historical
+and forecast patient absorption timelines.
 """
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from app.services.absorption_curve import generate_linear_absorption_curve
-
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
 
 from app.models import (
@@ -17,28 +18,28 @@ from app.models import (
     MealCarbGroup,
     MealComponentAbsorption,
 )
-
 from app.services.absorption_curve import (
     PatientAbsorptionInterval,
     aggregate_absorption_curves,
     forecast_window,
+    generate_linear_absorption_curve,
     history_window,
 )
-
-from sqlalchemy.exc import SQLAlchemyError
-
 from app.services.absorption_persistence import (
     stage_absorption_history,
     stage_current_forecast,
 )
 
-@dataclass(frozen=True)
-class PersistedPatientAbsorptionTimeline:
-    history_rows: list
-    forecast_rows: list
 
 @dataclass(frozen=True)
 class PatientAbsorptionTimeline:
+    """
+    Complete deterministic patient absorption timeline around one anchor.
+
+    History and forecast each contain exactly 72 clock-aligned
+    five-minute intervals.
+    """
+
     anchor_timestamp: datetime
 
     history_start: datetime
@@ -50,12 +51,41 @@ class PatientAbsorptionTimeline:
     history: list[PatientAbsorptionInterval]
     forecast: list[PatientAbsorptionInterval]
 
+
+@dataclass(frozen=True)
+class PersistedPatientAbsorptionTimeline:
+    """
+    ORM rows staged or persisted for one patient absorption timeline.
+    """
+
+    history_rows: list
+    forecast_rows: list
+
+
+@dataclass(frozen=True)
+class RebuiltPatientAbsorptionTimeline:
+    """
+    Result of building and persisting a patient absorption timeline.
+    """
+
+    timeline: PatientAbsorptionTimeline
+    persisted: PersistedPatientAbsorptionTimeline
+
+
 def build_component_curves(
     *,
     components,
 ):
     """
-    Build deterministic absorption curves from immutable component snapshots.
+    Build deterministic curves from immutable component snapshots.
+
+    The curve uses:
+      - Meal.meal_timestamp
+      - MealCarbGroup.carbs_grams
+      - snapshotted absorption delay
+      - snapshotted absorption duration
+
+    Current deterministic baseline supports only the linear curve type.
     """
 
     curves = []
@@ -85,6 +115,7 @@ def build_component_curves(
 
     return curves
 
+
 def component_overlaps_window(
     *,
     component,
@@ -92,8 +123,16 @@ def component_overlaps_window(
     window_end,
 ) -> bool:
     """
-    Return whether a snapshotted component absorption window overlaps
-    the requested half-open patient timeline window.
+    Return whether one component absorption window overlaps a requested
+    patient timeline window.
+
+    Both intervals are treated as half-open:
+
+        [absorption_start, absorption_end)
+        [window_start, window_end)
+
+    Therefore a component ending exactly at window_start does not overlap,
+    and one starting exactly at window_end does not overlap.
     """
 
     meal_timestamp = (
@@ -113,6 +152,7 @@ def component_overlaps_window(
         and absorption_end > window_start
     )
 
+
 async def load_overlapping_components(
     *,
     db,
@@ -121,16 +161,21 @@ async def load_overlapping_components(
     window_end,
 ):
     """
-    Load immutable meal-component absorption snapshots that may overlap
-    the requested patient timeline window.
+    Load immutable meal-component absorption snapshots that overlap the
+    requested patient timeline window.
 
-    The SQL query deliberately loads a conservative candidate set based on
-    meal time. Exact absorption overlap is then evaluated using the same pure
-    predicate used by the deterministic timeline code.
+    SQL performs patient isolation and a conservative meal-time bound.
+    Exact absorption overlap is evaluated by component_overlaps_window()
+    using the snapshotted delay and duration.
+
+    MealCarbGroup and Meal are eagerly loaded so deterministic curve
+    construction does not require async lazy-loading.
     """
 
     if window_end <= window_start:
-        raise ValueError("window_end must be after window_start")
+        raise ValueError(
+            "window_end must be after window_start"
+        )
 
     stmt = (
         select(MealComponentAbsorption)
@@ -174,6 +219,7 @@ async def load_overlapping_components(
         )
     ]
 
+
 async def build_patient_absorption_timeline(
     *,
     db,
@@ -183,6 +229,9 @@ async def build_patient_absorption_timeline(
     """
     Build the deterministic six-hour historical and six-hour forecast
     absorption timelines for one patient.
+
+    The exact anchor timestamp is retained, while both persisted/display
+    timelines use standardized five-minute clock boundaries.
     """
 
     history_start, history_end = history_window(
@@ -231,12 +280,14 @@ async def build_patient_absorption_timeline(
 
     if len(history) != 72:
         raise ValueError(
-            "historical absorption timeline must contain exactly 72 intervals"
+            "historical absorption timeline must contain "
+            "exactly 72 intervals"
         )
 
     if len(forecast) != 72:
         raise ValueError(
-            "forecast absorption timeline must contain exactly 72 intervals"
+            "forecast absorption timeline must contain "
+            "exactly 72 intervals"
         )
 
     return PatientAbsorptionTimeline(
@@ -249,6 +300,48 @@ async def build_patient_absorption_timeline(
         forecast=forecast,
     )
 
+
+async def stage_patient_absorption_timeline(
+    *,
+    db,
+    patient_id,
+    timeline: PatientAbsorptionTimeline,
+    derivation_model: str = "deterministic_linear",
+    derivation_version: str = "deterministic_linear_v1",
+    derivation_mode: str = "original",
+) -> PersistedPatientAbsorptionTimeline:
+    """
+    Stage historical absorption and current forecast without committing.
+
+    Historical staging is idempotent for an existing identical derivation.
+    Forecast staging replaces the patient's current operational forecast.
+
+    The caller owns the surrounding transaction.
+    """
+
+    history_rows = await stage_absorption_history(
+        db=db,
+        patient_id=patient_id,
+        timeline=timeline.history,
+        derivation_model=derivation_model,
+        derivation_version=derivation_version,
+        derivation_mode=derivation_mode,
+    )
+
+    forecast_rows = await stage_current_forecast(
+        db=db,
+        patient_id=patient_id,
+        forecast_anchor_timestamp=timeline.anchor_timestamp,
+        forecast_grid_start=timeline.forecast_start,
+        timeline=timeline.forecast,
+    )
+
+    return PersistedPatientAbsorptionTimeline(
+        history_rows=history_rows,
+        forecast_rows=forecast_rows,
+    )
+
+
 async def persist_patient_absorption_timeline(
     *,
     db,
@@ -259,34 +352,64 @@ async def persist_patient_absorption_timeline(
     derivation_mode: str = "original",
 ) -> PersistedPatientAbsorptionTimeline:
     """
-    Persist historical absorption and the current forecast as one transaction.
+    Persist historical absorption and current forecast as one transaction.
+
+    This wrapper owns commit/rollback. Call
+    stage_patient_absorption_timeline() when a larger transaction, such as
+    meal capture, must own the commit boundary.
     """
 
     try:
-        history_rows = stage_absorption_history(
+        result = await stage_patient_absorption_timeline(
             db=db,
             patient_id=patient_id,
-            timeline=timeline.history,
+            timeline=timeline,
             derivation_model=derivation_model,
             derivation_version=derivation_version,
             derivation_mode=derivation_mode,
         )
 
-        forecast_rows = await stage_current_forecast(
-            db=db,
-            patient_id=patient_id,
-            forecast_anchor_timestamp=timeline.anchor_timestamp,
-            forecast_grid_start=timeline.forecast_start,
-            timeline=timeline.forecast,
-        )
-
         await db.commit()
 
-    except SQLAlchemyError:
+    except Exception:
         await db.rollback()
         raise
 
-    return PersistedPatientAbsorptionTimeline(
-        history_rows=history_rows,
-        forecast_rows=forecast_rows,
+    return result
+
+
+async def rebuild_patient_absorption_timeline(
+    *,
+    db,
+    patient_id,
+    anchor_timestamp,
+) -> RebuiltPatientAbsorptionTimeline:
+    """
+    Build and atomically persist the patient's deterministic absorption
+    history and current forecast for an exact anchor timestamp.
+
+    This operation owns its persistence transaction. API operations that
+    need a larger transaction boundary should call:
+
+        build_patient_absorption_timeline()
+        stage_patient_absorption_timeline()
+
+    and commit themselves.
+    """
+
+    timeline = await build_patient_absorption_timeline(
+        db=db,
+        patient_id=patient_id,
+        anchor_timestamp=anchor_timestamp,
+    )
+
+    persisted = await persist_patient_absorption_timeline(
+        db=db,
+        patient_id=patient_id,
+        timeline=timeline,
+    )
+
+    return RebuiltPatientAbsorptionTimeline(
+        timeline=timeline,
+        persisted=persisted,
     )

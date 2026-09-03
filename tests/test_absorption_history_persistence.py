@@ -44,6 +44,12 @@ class _HistorySession:
         self.added_all = []
         self.commit_called = False
         self.rollback_called = False
+        self.existing_interval_starts = set()
+
+    async def execute(self, stmt):
+        return _ExecuteResult(
+            list(self.existing_interval_starts)
+        )
 
     def add_all(self, items):
         self.added_all.extend(items)
@@ -59,6 +65,20 @@ class _HistorySession:
     async def rollback(self):
         self.rollback_called = True
 
+class _ScalarCollection:
+    def __init__(self, values):
+        self.values = values
+
+    def all(self):
+        return self.values
+
+
+class _ExecuteResult:
+    def __init__(self, values):
+        self.values = values
+
+    def scalars(self):
+        return _ScalarCollection(self.values)
 
 @pytest.mark.asyncio
 async def test_persist_absorption_history_creates_expected_rows():
@@ -228,3 +248,34 @@ async def test_persist_absorption_history_rolls_back_on_commit_failure():
     assert len(session.added_all) == 72
     assert session.commit_called is True
     assert session.rollback_called is True
+
+@pytest.mark.asyncio
+async def test_persist_absorption_history_skips_existing_same_derivation():
+    patient_id = uuid4()
+    start = datetime(2026, 9, 3, 6, 40)
+
+    timeline = _history_timeline(start=start)
+
+    session = _HistorySession()
+
+    # Simulate the first 71 intervals already existing.
+    session.existing_interval_starts = {
+        start + timedelta(minutes=index * 5)
+        for index in range(71)
+    }
+
+    rows = await persist_absorption_history(
+        db=session,
+        patient_id=patient_id,
+        timeline=timeline,
+        derivation_model="deterministic_linear",
+        derivation_version="deterministic_linear_v1",
+        derivation_mode="original",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].interval_start == (
+        start + timedelta(minutes=355)
+    )
+
+    assert len(session.added_all) == 1

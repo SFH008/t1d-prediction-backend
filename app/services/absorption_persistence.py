@@ -9,7 +9,7 @@ with a partially updated forecast.
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -174,7 +174,7 @@ VALID_DERIVATION_MODES = {
     "retrospective",
 }
 
-def stage_absorption_history(
+async def stage_absorption_history(
     *,
     db: AsyncSession,
     patient_id: UUID,
@@ -196,6 +196,29 @@ def stage_absorption_history(
 
     _validate_history_grid(timeline)
 
+    existing_result = await db.execute(
+        select(
+            PatientAbsorptionHistory.interval_start
+        ).where(
+            PatientAbsorptionHistory.patient_id == patient_id,
+            PatientAbsorptionHistory.derivation_model
+            == derivation_model,
+            PatientAbsorptionHistory.derivation_version
+            == derivation_version,
+            PatientAbsorptionHistory.derivation_mode
+            == derivation_mode,
+            PatientAbsorptionHistory.interval_start.in_(
+                [
+                    point.interval_start
+                    for point in timeline
+                ]
+            ),
+        )
+    )
+
+    existing_interval_starts = set(
+        existing_result.scalars().all()
+    )
     rows = [
         PatientAbsorptionHistory(
             patient_id=patient_id,
@@ -215,6 +238,7 @@ def stage_absorption_history(
             derivation_mode=derivation_mode,
         )
         for point in timeline
+        if point.interval_start not in existing_interval_starts
     ]
 
     db.add_all(rows)
@@ -235,7 +259,7 @@ async def persist_absorption_history(
     """
 
     try:
-        rows = stage_absorption_history(
+        rows = await stage_absorption_history(
             db=db,
             patient_id=patient_id,
             timeline=timeline,

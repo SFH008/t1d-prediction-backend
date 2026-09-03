@@ -13,6 +13,10 @@ Later steps will extend the meal lifecycle without changing the meal ID.
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
+from unittest.mock import AsyncMock, patch
+
+from sqlalchemy.exc import SQLAlchemyError
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +34,11 @@ from app.models import (
 from app.schema.schemas import (
     MealCreate,
     MealResponse,
+)
+
+from app.services.absorption_timeline import (
+    build_patient_absorption_timeline,
+    stage_patient_absorption_timeline,
 )
 
 
@@ -163,80 +172,129 @@ async def create_meal(
         rounding=ROUND_HALF_UP,
     )
 
-    db.add(meal)
+    try:
+        db.add(meal)
 
-    # Allocate database identities without committing. This allows each
-    # component absorption snapshot to reference its MealCarbGroup while
-    # keeping the complete meal capture atomic.
-    await db.flush()
+        # Allocate Meal and MealCarbGroup identities without committing.
+        await db.flush()
 
-    for meal_group in meal.carb_groups:
-        definition_stmt = select(
-            CarbGroupDefinition
-        ).where(
-            CarbGroupDefinition.group_number == meal_group.group_number,
-            CarbGroupDefinition.is_active.is_(True),
-        )
-
-        definition_result = await db.execute(definition_stmt)
-        definition = definition_result.scalar_one_or_none()
-
-        if definition is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No active carbohydrate definition "
-                    f"exists for group {meal_group.group_number}"
-                ),
+        for meal_group in meal.carb_groups:
+            definition_stmt = select(
+                CarbGroupDefinition
+            ).where(
+                CarbGroupDefinition.group_number
+                == meal_group.group_number,
+                CarbGroupDefinition.is_active.is_(True),
             )
 
-        profile_key = definition.default_absorption_profile_key
-
-        if profile_key is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No default absorption profile is configured "
-                    f"for carbohydrate group {meal_group.group_number}"
-                ),
+            definition_result = await db.execute(
+                definition_stmt
+            )
+            definition = (
+                definition_result.scalar_one_or_none()
             )
 
-        profile_stmt = select(
-            CarbAbsorptionProfile
-        ).where(
-            CarbAbsorptionProfile.patient_id == patient_id,
-            CarbAbsorptionProfile.profile_key == profile_key,
-            CarbAbsorptionProfile.is_active.is_(True),
-        )
+            if definition is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "No active carbohydrate definition "
+                        f"exists for group {meal_group.group_number}"
+                    ),
+                )
 
-        profile_result = await db.execute(profile_stmt)
-        profile = profile_result.scalar_one_or_none()
-
-        if profile is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"No active '{profile_key}' carbohydrate absorption "
-                    "profile exists for this patient"
-                ),
+            profile_key = (
+                definition.default_absorption_profile_key
             )
 
-        component_absorption = MealComponentAbsorption(
-            meal_carb_group_id=meal_group.id,
+            if profile_key is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "No default absorption profile is "
+                        "configured for carbohydrate group "
+                        f"{meal_group.group_number}"
+                    ),
+                )
+
+            profile_stmt = select(
+                CarbAbsorptionProfile
+            ).where(
+                CarbAbsorptionProfile.patient_id
+                == patient_id,
+                CarbAbsorptionProfile.profile_key
+                == profile_key,
+                CarbAbsorptionProfile.is_active.is_(True),
+            )
+
+            profile_result = await db.execute(
+                profile_stmt
+            )
+            profile = (
+                profile_result.scalar_one_or_none()
+            )
+
+            if profile is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"No active '{profile_key}' carbohydrate "
+                        "absorption profile exists for this patient"
+                    ),
+                )
+
+            component_absorption = (
+                MealComponentAbsorption(
+                    meal_carb_group_id=meal_group.id,
+                    patient_id=patient_id,
+                    absorption_profile_id=profile.id,
+                    absorption_profile_key=profile.profile_key,
+                    absorption_delay_minutes=(
+                        profile.absorption_delay_minutes
+                    ),
+                    absorption_duration_minutes=(
+                        profile.duration_minutes
+                    ),
+                    curve_type="linear",
+                    curve_parameters=None,
+                    classification_source=(
+                        "carb_group_default_v1"
+                    ),
+                    model_version=(
+                        "deterministic_linear_v1"
+                    ),
+                )
+            )
+
+            db.add(component_absorption)
+
+        # Make the newly created component snapshots visible to
+        # timeline queries in this same transaction.
+        await db.flush()
+
+        timeline = await build_patient_absorption_timeline(
+            db=db,
             patient_id=patient_id,
-            absorption_profile_id=profile.id,
-            absorption_profile_key=profile.profile_key,
-            absorption_delay_minutes=profile.absorption_delay_minutes,
-            absorption_duration_minutes=profile.duration_minutes,
-            curve_type="linear",
-            curve_parameters=None,
-            classification_source="carb_group_default_v1",
-            model_version="deterministic_linear_v1",
+            anchor_timestamp=meal.meal_timestamp,
         )
 
-        db.add(component_absorption)
+        await stage_patient_absorption_timeline(
+            db=db,
+            patient_id=patient_id,
+            timeline=timeline,
+        )
 
-    await db.commit()
+        # One commit owns:
+        #   Meal
+        #   MealCarbGroups
+        #   MealComponentAbsorptions
+        #   historical absorption updates
+        #   current 72-point forecast replacement
+        await db.commit()
+
+    except Exception:
+        await db.rollback()
+        raise
 
     # Reload children explicitly because the relationship is async-session
     # safe and the response needs the complete aggregate.
