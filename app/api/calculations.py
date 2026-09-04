@@ -22,6 +22,8 @@ from app.models import (
     DoseStrategySettings,
     Meal,
     MealCalculation,
+    MealCarbGroup,
+    MealComponentAbsorption,
     MealDoseEvent,
     Patient,
     TherapyLimit,
@@ -37,6 +39,10 @@ from app.services.therapy_context import (
     resolve_therapy_context,
 )
 
+from app.services.meal_absorption import (
+    MealAbsorptionSummary,
+    resolve_meal_absorption_summary,
+)
 
 router = APIRouter(tags=["Meal Calculations"])
 
@@ -261,6 +267,46 @@ def _persist_derived_absorption_classification(
     meal.absorption_classification_source = classification_source
     return True
 
+_COMPONENT_DERIVED_ABSORPTION_SOURCES = frozenset({
+    "meal_category_rule_v1",
+    "component_single_v1",
+    "component_uniform_v1",
+    "component_mixed_v1",
+})
+
+
+def _meal_absorption_classification_is_component_replaceable(
+    meal: Meal,
+) -> bool:
+    """Return True when component snapshots may establish/refresh the summary."""
+    if _meal_absorption_classification_is_unset(meal):
+        return True
+
+    return (
+        meal.absorption_classification_source
+        in _COMPONENT_DERIVED_ABSORPTION_SOURCES
+    )
+
+def _persist_component_absorption_classification(
+    *,
+    meal: Meal,
+    summary: MealAbsorptionSummary,
+) -> bool:
+    """Persist a component-derived meal absorption summary.
+
+    Explicit/manual meal classifications remain immutable.
+    Mixed meals intentionally have no single absorption profile id.
+    """
+    if not _meal_absorption_classification_is_component_replaceable(meal):
+        return False
+
+    meal.absorption_profile_id = summary.profile_id
+    meal.absorption_profile_key = summary.profile_key
+    meal.absorption_classification_source = (
+        summary.classification_source
+    )
+    return True
+
 
 def _absorption_profile_key_for_meal(meal: Meal) -> tuple[str, str]:
     """Baseline deterministic meal-type classifier; future models can replace it."""
@@ -432,28 +478,36 @@ async def calculate_meal(
     except TherapyContextError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    absorption_key, classification_source = _absorption_profile_key_for_meal(meal)
-    absorption_result = await db.execute(
-        select(CarbAbsorptionProfile).where(
-            CarbAbsorptionProfile.patient_id == patient_id,
-            CarbAbsorptionProfile.profile_key == absorption_key,
-            CarbAbsorptionProfile.is_active.is_(True),
+    component_absorptions_result = await db.execute(
+        select(MealComponentAbsorption)
+        .join(
+            MealCarbGroup,
+            MealCarbGroup.id
+            == MealComponentAbsorption.meal_carb_group_id,
+        )
+        .where(
+            MealCarbGroup.meal_id == meal.id,
+            MealComponentAbsorption.patient_id == patient_id,
         )
     )
-    absorption_profile = absorption_result.scalar_one_or_none()
-    if absorption_profile is None:
+
+    component_absorptions = (
+        component_absorptions_result.scalars().all()
+    )
+
+    try:
+        absorption_summary = resolve_meal_absorption_summary(
+            component_absorptions
+        )
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "No active carbohydrate absorption profile is configured "
-                f"for meal class '{absorption_key}'"
-            ),
-        )
+            detail=str(exc),
+        ) from exc
 
-    _persist_derived_absorption_classification(
+    _persist_component_absorption_classification(
         meal=meal,
-        absorption_profile=absorption_profile,
-        classification_source=classification_source,
+        summary=absorption_summary,
     )
 
     addon_percent = (
@@ -494,11 +548,13 @@ async def calculate_meal(
         fat_protein_addon_percent=result.fat_protein_addon_percent,
         fat_protein_addon_grams=result.fat_protein_addon_grams,
         effective_carbohydrate_grams=result.effective_carbohydrate_grams,
-        absorption_profile_id=absorption_profile.id,
-        absorption_profile_key=absorption_profile.profile_key,
-        absorption_duration_minutes=absorption_profile.duration_minutes,
-        absorption_delay_minutes=absorption_profile.absorption_delay_minutes,
-        absorption_classification_source=classification_source,
+        absorption_profile_id=absorption_summary.profile_id,
+        absorption_profile_key=absorption_summary.profile_key,
+        absorption_duration_minutes=absorption_summary.duration_minutes,
+        absorption_delay_minutes=absorption_summary.delay_minutes,
+        absorption_classification_source=(
+            absorption_summary.classification_source
+        ),
         dose_1_share_percent=result.dose_1_share_percent,
         dose_2_share_percent=result.dose_2_share_percent,
         dose_2_delay_minutes=strategy.dose_2_delay_minutes,
@@ -525,7 +581,7 @@ async def calculate_meal(
         notes=(
             f"Meal therapy context: {meal_context.source}; "
             f"Dose 2 therapy context: {dose_2_context.source}; "
-            f"absorption={absorption_profile.profile_key}; "
+            f"absorption={absorption_summary.profile_key}; "
             f"strategy={strategy.strategy_source}"
         ),
     )

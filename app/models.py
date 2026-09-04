@@ -375,6 +375,18 @@ class Meal(Base):
     # Snapshot of the calculated total at capture time.
     total_carbs_grams = Column(Numeric(8, 1), nullable=False, default=0)
 
+    fat_grams = Column(
+    Numeric(8, 1),
+    nullable=False,
+    default=Decimal("0.0"),
+    )
+
+    protein_grams = Column(
+    Numeric(8, 1),
+    nullable=False,
+    default=Decimal("0.0"),
+    )
+
     # Meal-derived absorption classification. The profile link points to the
     # current patient configuration, while key/source preserve readable event
     # context. Calculation snapshots remain immutable even if profiles change.
@@ -455,6 +467,16 @@ class MealCarbGroup(Base):
 
     # Snapshot of quantity * carb factor.
     carbs_grams = Column(Numeric(8, 1), nullable=False)
+
+    consumed_quantity_grams = Column(
+        Numeric(8, 1),
+        nullable=True,
+    )
+
+    consumed_carbs_grams = Column(
+        Numeric(8, 1),
+        nullable=True,
+    )
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

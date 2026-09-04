@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 
+from decimal import Decimal
+
 # ============================================================================
 # Patient Schemas
 # ============================================================================
@@ -250,6 +252,30 @@ class MealCarbGroupCreate(BaseModel):
     group_number: int = Field(..., ge=1, le=12)
     quantity_grams: float = Field(..., gt=0, le=5000)
 
+class MealConsumptionGroupUpdate(BaseModel):
+    """Actual consumed quantity for one captured meal component."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_number: int = Field(..., ge=1, le=12)
+    consumed_quantity_grams: Decimal = Field(
+        ...,
+        ge=0,
+        le=5000,
+    )
+
+
+class MealConsumptionUpdate(BaseModel):
+    """Record actual consumption for a captured meal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    carb_groups: List[MealConsumptionGroupUpdate] = Field(
+        ...,
+        min_length=1,
+        max_length=12,
+    )
+
 class CarbGroupDefinitionUpdate(BaseModel):
     """
     Admin-managed updates for a canonical carbohydrate group.
@@ -291,6 +317,8 @@ class MealCarbGroupResponse(BaseModel):
     quantity_grams: float
     carb_factor_g_per_g: float
     carbs_grams: float
+    consumed_quantity_grams: Optional[float] = None
+    consumed_carbs_grams: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -304,11 +332,30 @@ class MealCreate(BaseModel):
     The meal is the primary interaction. Carb groups are submitted together
     as one atomic request.
     """
+
+    model_config = ConfigDict(extra="forbid")
+
     meal_timestamp: datetime
     meal_category: str = Field(..., min_length=1, max_length=50)
+
     carb_groups: List[MealCarbGroupCreate] = Field(
-        ..., min_length=1, max_length=12
+        ...,
+        min_length=1,
+        max_length=12,
     )
+
+    fat_grams: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        le=5000,
+    )
+
+    protein_grams: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        le=5000,
+    )
+
     source: Optional[str] = "manual"
     notes: Optional[str] = None
 
@@ -319,11 +366,14 @@ class MealResponse(BaseModel):
     meal_category: str
     status: str
     total_carbs_grams: float
+    fat_grams: float
+    protein_grams: float
     source: str
     notes: Optional[str]
     created_at: datetime
     updated_at: datetime
     carb_groups: List[MealCarbGroupResponse]
+
 
     class Config:
         from_attributes = True

@@ -11,12 +11,134 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.calculations import (
     _persist_calculation_with_dose_plan,
+    _persist_component_absorption_classification,
     _persist_derived_absorption_classification,
     _planned_dose_events_for_calculation,
     _round_units,
 )
-from app.models import CarbAbsorptionProfile, Meal, MealCalculation
 
+from app.services.meal_absorption import (
+    MealAbsorptionSummary,
+    resolve_meal_absorption_summary,
+)
+
+from app.models import (
+    CarbAbsorptionProfile,
+    Meal,
+    MealCalculation,
+    MealComponentAbsorption,
+)
+
+def test_mixed_component_summary_can_be_persisted_on_meal():
+    from app.api.calculations import (
+        _persist_component_absorption_classification,
+    )
+
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        meal_category="meal",
+        total_carbs_grams=Decimal("40.0"),
+    )
+
+    summary = MealAbsorptionSummary(
+        profile_key="mixed",
+        profile_id=None,
+        delay_minutes=10,
+        duration_minutes=300,
+        classification_source="component_mixed_v1",
+    )
+
+    changed = _persist_component_absorption_classification(
+        meal=meal,
+        summary=summary,
+    )
+
+    assert changed is True
+    assert meal.absorption_profile_id is None
+    assert meal.absorption_profile_key == "mixed"
+    assert (
+        meal.absorption_classification_source
+        == "component_mixed_v1"
+    )
+
+def _absorption_component(
+    key: str,
+    *,
+    duration: int,
+    delay: int = 10,
+    profile_id=None,
+):
+    return MealComponentAbsorption(
+        id=uuid4(),
+        meal_carb_group_id=uuid4(),
+        patient_id=uuid4(),
+        absorption_profile_id=profile_id,
+        absorption_profile_key=key,
+        absorption_delay_minutes=delay,
+        absorption_duration_minutes=duration,
+        curve_type="linear",
+        classification_source="carb_group_default_v1",
+        model_version="deterministic_linear_v1",
+    )
+
+
+def test_fruit_component_resolves_fast_for_calculation():
+    profile_id = uuid4()
+
+    summary = resolve_meal_absorption_summary([
+        _absorption_component(
+            "fast",
+            duration=60,
+            profile_id=profile_id,
+        ),
+    ])
+
+    assert summary.profile_key == "fast"
+    assert summary.profile_id == profile_id
+    assert summary.delay_minutes == 10
+    assert summary.duration_minutes == 60
+    assert summary.classification_source == "component_single_v1"
+
+
+def test_bolognese_component_resolves_slow_for_calculation():
+    profile_id = uuid4()
+
+    summary = resolve_meal_absorption_summary([
+        _absorption_component(
+            "slow",
+            duration=300,
+            profile_id=profile_id,
+        ),
+    ])
+
+    assert summary.profile_key == "slow"
+    assert summary.profile_id == profile_id
+    assert summary.delay_minutes == 10
+    assert summary.duration_minutes == 300
+    assert summary.classification_source == "component_single_v1"
+
+
+def test_fast_and_slow_components_resolve_mixed_for_calculation():
+    summary = resolve_meal_absorption_summary([
+        _absorption_component(
+            "fast",
+            duration=60,
+            profile_id=uuid4(),
+        ),
+        _absorption_component(
+            "slow",
+            duration=300,
+            profile_id=uuid4(),
+        ),
+    ])
+
+    assert summary.profile_key == "mixed"
+    assert summary.profile_id is None
+    assert summary.delay_minutes == 10
+    assert summary.duration_minutes == 300
+    assert summary.classification_source == "component_mixed_v1"
 
 def test_round_units():
     assert _round_units(Decimal("1.234")) == Decimal("1.23")
@@ -313,3 +435,113 @@ def test_derived_absorption_classification_does_not_overwrite_explicit_meal():
     assert meal.absorption_profile_id == explicit_profile_id
     assert meal.absorption_profile_key == "slow"
     assert meal.absorption_classification_source == "manual"
+
+
+def test_component_classification_does_not_overwrite_explicit_meal():
+    from app.api.calculations import (
+        _persist_component_absorption_classification,
+    )
+
+    explicit_profile_id = uuid4()
+
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        meal_category="meal",
+        total_carbs_grams=Decimal("40.0"),
+        absorption_profile_id=explicit_profile_id,
+        absorption_profile_key="slow",
+        absorption_classification_source="manual",
+    )
+
+    summary = MealAbsorptionSummary(
+        profile_key="fast",
+        profile_id=uuid4(),
+        delay_minutes=10,
+        duration_minutes=60,
+        classification_source="component_single_v1",
+    )
+
+    changed = _persist_component_absorption_classification(
+        meal=meal,
+        summary=summary,
+    )
+
+    assert changed is False
+    assert meal.absorption_profile_id == explicit_profile_id
+    assert meal.absorption_profile_key == "slow"
+    assert meal.absorption_classification_source == "manual"
+
+
+def test_component_classification_replaces_legacy_meal_category_derivation():
+    legacy_profile_id = uuid4()
+
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        meal_category="meal",
+        total_carbs_grams=Decimal("40.0"),
+        absorption_profile_id=legacy_profile_id,
+        absorption_profile_key="medium",
+        absorption_classification_source="meal_category_rule_v1",
+    )
+
+    summary = MealAbsorptionSummary(
+        profile_key="fast",
+        profile_id=uuid4(),
+        delay_minutes=10,
+        duration_minutes=60,
+        classification_source="component_single_v1",
+    )
+
+    changed = _persist_component_absorption_classification(
+        meal=meal,
+        summary=summary,
+    )
+
+    assert changed is True
+    assert meal.absorption_profile_id == summary.profile_id
+    assert meal.absorption_profile_key == "fast"
+    assert (
+        meal.absorption_classification_source
+        == "component_single_v1"
+    )
+
+
+def test_component_classification_can_refresh_previous_component_summary():
+    old_profile_id = uuid4()
+    new_profile_id = uuid4()
+
+    meal = Meal(
+        id=uuid4(),
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        meal_category="meal",
+        total_carbs_grams=Decimal("40.0"),
+        absorption_profile_id=old_profile_id,
+        absorption_profile_key="medium",
+        absorption_classification_source="component_uniform_v1",
+    )
+
+    summary = MealAbsorptionSummary(
+        profile_key="slow",
+        profile_id=new_profile_id,
+        delay_minutes=10,
+        duration_minutes=300,
+        classification_source="component_single_v1",
+    )
+
+    changed = _persist_component_absorption_classification(
+        meal=meal,
+        summary=summary,
+    )
+
+    assert changed is True
+    assert meal.absorption_profile_id == new_profile_id
+    assert meal.absorption_profile_key == "slow"
+    assert (
+        meal.absorption_classification_source
+        == "component_single_v1"
+    )

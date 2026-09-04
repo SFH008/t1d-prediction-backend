@@ -32,6 +32,7 @@ from app.models import (
     Patient,
 )
 from app.schema.schemas import (
+    MealConsumptionUpdate,
     MealCreate,
     MealResponse,
 )
@@ -47,6 +48,14 @@ router = APIRouter(tags=["Meals"])
 MAX_CARB_GROUPS = 12
 CUSTOM_GROUP_NUMBER = 12
 
+from datetime import UTC, datetime
+
+
+def _to_utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 def calculate_group_carbs(quantity_grams: float, carb_factor_g_per_g: float) -> Decimal:
     """
@@ -110,12 +119,14 @@ async def create_meal(
 
     meal = Meal(
         patient_id=patient_id,
-        meal_timestamp=meal_create.meal_timestamp,
+        meal_timestamp=_to_utc_naive(meal_create.meal_timestamp),
         meal_category=meal_create.meal_category,
         status="captured",
         source=meal_create.source or "manual",
         notes=meal_create.notes,
         total_carbs_grams=Decimal("0.0"),
+        fat_grams=meal_create.fat_grams,
+        protein_grams=meal_create.protein_grams,
     )
 
     total_carbs = Decimal("0.0")
@@ -306,6 +317,108 @@ async def create_meal(
     result = await db.execute(stmt)
     return result.scalar_one()
 
+@router.patch(
+    "/patients/{patient_id}/meals/{meal_id}/consumption",
+    response_model=MealResponse,
+)
+async def update_meal_consumption(
+    patient_id: UUID,
+    meal_id: UUID,
+    consumption_update: MealConsumptionUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(Meal)
+        .where(
+            Meal.id == meal_id,
+            Meal.patient_id == patient_id,
+        )
+        .options(
+            selectinload(Meal.carb_groups),
+        )
+    )
+
+    result = await db.execute(stmt)
+    meal = result.scalar_one_or_none()
+
+    if meal is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Meal {meal_id} not found",
+        )
+
+    groups_by_number = {
+        group.group_number: group
+        for group in meal.carb_groups
+    }
+
+    pending_updates = []
+
+    try:
+        # Pass 1: validate and calculate every requested update.
+        # Do not mutate ORM objects during this pass.
+        for item in consumption_update.carb_groups:
+            group = groups_by_number.get(item.group_number)
+
+            if group is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Carbohydrate group {item.group_number} "
+                        "is not part of this meal"
+                    ),
+                )
+
+            consumed_quantity = Decimal(
+                str(item.consumed_quantity_grams)
+            )
+
+            planned_quantity = Decimal(
+                str(group.quantity_grams)
+            )
+
+            if consumed_quantity > planned_quantity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Consumed quantity for carbohydrate group "
+                        f"{item.group_number} cannot exceed planned quantity"
+                    ),
+                )
+
+            consumed_carbs = calculate_group_carbs(
+                consumed_quantity,
+                group.carb_factor_g_per_g,
+            )
+
+            pending_updates.append(
+                (
+                    group,
+                    consumed_quantity,
+                    consumed_carbs,
+                )
+            )
+
+        # Pass 2: only mutate after the complete request is valid.
+        for (
+            group,
+            consumed_quantity,
+            consumed_carbs,
+        ) in pending_updates:
+            group.consumed_quantity_grams = consumed_quantity
+            group.consumed_carbs_grams = consumed_carbs
+
+        await db.commit()
+
+    except HTTPException:
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        raise
+
+    return meal
 
 @router.get(
     "/patients/{patient_id}/meals",
