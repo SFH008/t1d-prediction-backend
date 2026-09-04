@@ -11,6 +11,7 @@ from fastapi import HTTPException
 import pytest
 from pydantic import ValidationError
 
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.api.calculations import calculate_meal_dose
 from app.api.meals import (
@@ -18,18 +19,21 @@ from app.api.meals import (
     create_meal,
     update_meal_consumption,
 )
+
 from app.models import (
     CarbAbsorptionProfile,
     CarbGroupDefinition,
+    Meal,
     MealCarbGroup,
 )
+
 from app.schema.schemas import (
     MealConsumptionUpdate,
     MealCarbGroupResponse,
     MealCreate,
     MealResponse,
 )
-from unittest.mock import AsyncMock, patch
+
 from sqlalchemy.exc import SQLAlchemyError
 
 def test_to_utc_naive_converts_aware_datetime():
@@ -1048,3 +1052,133 @@ async def test_update_meal_consumption_is_atomic_across_components():
 
     assert session.commit_called is False
     assert session.rollback_called is True
+
+def test_consumption_rejects_duplicate_group_numbers():
+    with pytest.raises(ValueError):
+        MealConsumptionUpdate(
+            carb_groups=[
+                {
+                    "group_number": 2,
+                    "consumed_quantity_grams": 20,
+                },
+                {
+                    "group_number": 2,
+                    "consumed_quantity_grams": 30,
+                },
+            ]
+        )
+
+@pytest.mark.asyncio
+async def test_update_meal_consumption_rejects_group_not_in_meal():
+    patient_id = uuid4()
+    meal_id = uuid4()
+
+    meal = Meal(
+        id=meal_id,
+        patient_id=patient_id,
+        meal_timestamp=datetime.now(),
+        meal_category="Lunch",
+        total_carbs_grams=Decimal("40.0"),
+        status="captured",
+    )
+
+    fruit = MealCarbGroup(
+        group_number=2,
+        group_key="fruit",
+        group_name="Fruit",
+        quantity_grams=Decimal("40.0"),
+        carb_factor_g_per_g=Decimal("1.0"),
+        carbs_grams=Decimal("40.0"),
+    )
+
+    meal.carb_groups = [fruit]
+
+    db = AsyncMock()
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = meal
+    db.execute.return_value = result
+
+    payload = MealConsumptionUpdate(
+        carb_groups=[
+            {
+                "group_number": 10,
+                "consumed_quantity_grams": 20,
+            }
+        ]
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_meal_consumption(
+            patient_id=patient_id,
+            meal_id=meal_id,
+            consumption_update=payload,
+            db=db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "is not part of this meal" in exc_info.value.detail
+
+    assert fruit.consumed_quantity_grams is None
+    assert fruit.consumed_carbs_grams is None
+
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_update_meal_consumption_persists_zero_consumption():
+    patient_id = uuid4()
+    meal_id = uuid4()
+
+    meal = Meal(
+        id=meal_id,
+        patient_id=patient_id,
+        meal_timestamp=datetime.now(),
+        meal_category="Lunch",
+        total_carbs_grams=Decimal("40.0"),
+        status="captured",
+    )
+
+    fruit = MealCarbGroup(
+        group_number=2,
+        group_key="fruit",
+        group_name="Fruit",
+        quantity_grams=Decimal("40.0"),
+        carb_factor_g_per_g=Decimal("1.0"),
+        carbs_grams=Decimal("40.0"),
+    )
+
+    meal.carb_groups = [fruit]
+
+    db = AsyncMock()
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = meal
+    db.execute.return_value = result
+
+    payload = MealConsumptionUpdate(
+        carb_groups=[
+            {
+                "group_number": 2,
+                "consumed_quantity_grams": 0,
+            }
+        ]
+    )
+
+    updated_meal = await update_meal_consumption(
+        patient_id=patient_id,
+        meal_id=meal_id,
+        consumption_update=payload,
+        db=db,
+    )
+
+    assert updated_meal is meal
+
+    assert fruit.quantity_grams == Decimal("40.0")
+    assert fruit.carbs_grams == Decimal("40.0")
+
+    assert fruit.consumed_quantity_grams == Decimal("0")
+    assert fruit.consumed_carbs_grams == Decimal("0.0")
+
+    db.commit.assert_awaited_once()
+    db.rollback.assert_not_awaited()

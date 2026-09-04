@@ -2,7 +2,7 @@
 Pydantic schemas for API request/response validation.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
@@ -275,6 +275,20 @@ class MealConsumptionUpdate(BaseModel):
         min_length=1,
         max_length=12,
     )
+
+    @model_validator(mode="after")
+    def validate_unique_group_numbers(self):
+        group_numbers = [
+            group.group_number
+            for group in self.carb_groups
+        ]
+
+        if len(group_numbers) != len(set(group_numbers)):
+            raise ValueError(
+                "Duplicate carbohydrate group numbers are not allowed"
+            )
+
+        return self
 
 class CarbGroupDefinitionUpdate(BaseModel):
     """

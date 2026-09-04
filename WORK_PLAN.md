@@ -90,63 +90,44 @@ Fat and protein stored here are nutritional facts only.
 They do not alter insulin recommendations in B2.2.
 
 #### B2.2B — Actual meal consumption
-Status: IN PROGRESS
+Status: COMPLETE
 
-Component model:
+Implemented and verified:
 
-- `quantity_grams` = original served/planned quantity.
-- `carbs_grams` = original server-derived planned carbohydrates.
-- `consumed_quantity_grams` = actual eaten quantity, nullable until known.
-- `consumed_carbs_grams` = server-derived actual carbohydrates, nullable until known.
-
-Semantic rules:
-
-- `NULL` means consumption has not yet been recorded.
+- `consumed_quantity_grams` records actual eaten component quantity.
+- `consumed_carbs_grams` is derived server-side from the immutable stored carb factor.
+- `NULL` means consumption has not been recorded.
 - `0` means explicitly recorded that none was eaten.
-- Planned quantity/carbohydrate snapshots are never mutated.
-- Client cannot provide `consumed_carbs_grams`.
-- Actual carbohydrates are calculated using the component's immutable stored carb factor.
-- Consumed quantity cannot exceed planned quantity.
-- Multi-component updates validate completely before ORM mutation.
-
-Completed gates:
-
-- Consumption request schema.
-- Zero consumption accepted.
+- Planned quantity and carbohydrate snapshots are never mutated.
 - Negative consumption rejected.
-- Client-supplied consumed carbs rejected.
-- ORM fields nullable by default.
-- Response supports unknown consumption.
-- PATCH consumption path implemented.
-- Server-derived consumed carbohydrates verified.
-- Planned snapshots preserved.
-- Over-consumption rejected.
-- Multi-component validation is atomic.
+- Consumption greater than planned quantity rejected.
+- Client-supplied consumed carbohydrate totals rejected.
+- Duplicate component numbers rejected at request validation.
+- Components not belonging to the meal rejected.
+- Multi-component updates validate atomically before ORM mutation.
+- Zero consumption persists distinctly from unknown consumption.
+- Migration `010_add_meal_consumption_fields.sql` applied.
+- PostgreSQL non-negative and not-over-planned constraints verified.
+- Existing component rows remain NULL/unknown after migration.
+- Full backend test suite green.
 
-Next gates:
+Consumption aggregation rule:
 
-1. Reject duplicate group numbers in a consumption update.
-2. Reject components that are not part of the captured meal.
-3. Verify zero-consumption persistence through endpoint.
-4. Add migration `010` for:
-   - `meal_carb_groups.consumed_quantity_grams`
-   - `meal_carb_groups.consumed_carbs_grams`
-5. Add meal-level `consumed_carbs_grams` if needed as a server-derived aggregate.
-6. Define partial-update versus complete-consumption semantics explicitly.
-7. Refresh/rebuild active carbohydrate timeline from actual consumed quantities.
-8. Verify timeline update is atomic with consumption persistence.
-9. Run full test suite.
-10. Live PostgreSQL/API verification.
+- Partial component consumption updates are allowed.
+- A meal-level actual carbohydrate total must not be treated as complete while
+  any captured component has unknown consumption.
+- Once every component has known consumption, actual meal carbohydrates can be
+  derived as the sum of component `consumed_carbs_grams`.
+- Do not persist a misleading partial total as `Meal.consumed_carbs_grams`.
 
-Dose-2 foundation:
+Next:
 
-    insulin required for actual consumed meal
-    - insulin already administered
-    = remaining insulin requirement
-
-Do not implement this dose calculation until B2.2 consumption state is complete.
-
----
+- Integrate actual consumption into the deterministic carbohydrate absorption
+  timeline.
+- Define how partial consumption affects the active timeline before changing
+  timeline calculation code.
+- Preserve historical planned meal/component snapshots.
+- Verify timeline replacement and consumption persistence semantics with tests.
 
 ### B2.3 — Warsaw-inspired delayed nutrient model
 Status: NEXT
