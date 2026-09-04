@@ -99,8 +99,14 @@ def build_component_curves(
         meal_group = component.meal_carb_group
         meal = meal_group.meal
 
+        curve_carbs_grams = (
+            meal_group.carbs_grams
+            if meal_group.consumed_carbs_grams is None
+            else meal_group.consumed_carbs_grams
+        )
+
         curve = generate_linear_absorption_curve(
-            carbs_grams=meal_group.carbs_grams,
+            carbs_grams=curve_carbs_grams,
             meal_timestamp=meal.meal_timestamp,
             absorption_delay_minutes=(
                 component.absorption_delay_minutes

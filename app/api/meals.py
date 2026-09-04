@@ -30,6 +30,7 @@ from app.models import (
     MealCarbGroup,
     MealComponentAbsorption,
     Patient,
+    PatientCarbGroupSetting,
 )
 from app.schema.schemas import (
     MealConsumptionUpdate,
@@ -214,8 +215,33 @@ async def create_meal(
                     ),
                 )
 
+            patient_setting_stmt = select(
+                PatientCarbGroupSetting
+            ).where(
+                PatientCarbGroupSetting.patient_id == patient_id,
+                PatientCarbGroupSetting.carb_group_definition_id
+                == definition.id,
+                PatientCarbGroupSetting.is_active.is_(True),
+            )
+            patient_setting_result = await db.execute(
+                patient_setting_stmt
+            )
+            patient_setting = (
+                patient_setting_result.scalar_one_or_none()
+            )
+
             profile_key = (
-                definition.default_absorption_profile_key
+                patient_setting.absorption_profile_key
+                if patient_setting is not None
+                and patient_setting.absorption_profile_key is not None
+                else definition.default_absorption_profile_key
+            )
+
+            absorption_delay_minutes = (
+                patient_setting.absorption_delay_minutes
+                if patient_setting is not None
+                and patient_setting.absorption_delay_minutes is not None
+                else definition.default_absorption_delay_minutes
             )
 
             if profile_key is None:
@@ -261,7 +287,7 @@ async def create_meal(
                     absorption_profile_id=profile.id,
                     absorption_profile_key=profile.profile_key,
                     absorption_delay_minutes=(
-                        profile.absorption_delay_minutes
+                        absorption_delay_minutes
                     ),
                     absorption_duration_minutes=(
                         profile.duration_minutes
@@ -269,7 +295,9 @@ async def create_meal(
                     curve_type="linear",
                     curve_parameters=None,
                     classification_source=(
-                        "carb_group_default_v1"
+                        "patient_carb_group_setting_v1"
+                        if patient_setting is not None
+                        else "carb_group_default_v2"
                     ),
                     model_version=(
                         "deterministic_linear_v1"
@@ -407,6 +435,22 @@ async def update_meal_consumption(
         ) in pending_updates:
             group.consumed_quantity_grams = consumed_quantity
             group.consumed_carbs_grams = consumed_carbs
+
+        # Make updated consumption visible to the timeline query
+        # within this same transaction.
+        await db.flush()
+
+        timeline = await build_patient_absorption_timeline(
+            db=db,
+            patient_id=patient_id,
+            anchor_timestamp=meal.meal_timestamp,
+        )
+
+        await stage_patient_absorption_timeline(
+            db=db,
+            patient_id=patient_id,
+            timeline=timeline,
+        )
 
         await db.commit()
 

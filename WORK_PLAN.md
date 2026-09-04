@@ -61,13 +61,45 @@ Live verification completed for:
 - Bolognese -> slow.
 - Fruit + Bolognese -> mixed.
 
+Amendment — patient-specific per-carb-group absorption configuration:
+
+- `carb_group_definitions.default_absorption_delay_minutes` provides the
+  system/global default absorption onset delay for each carbohydrate group.
+- `patient_carb_group_settings` provides optional patient-specific clinical
+  overrides for absorption profile and absorption onset delay.
+- Patient-specific clinical overrides are admin-managed configuration and are
+  not normal user preferences.
+- At meal capture, the backend resolves the active patient-specific setting
+  when present; otherwise it falls back to the global carbohydrate-group
+  default.
+- The resolved absorption profile and delay are snapshotted into
+  `meal_component_absorptions`.
+- Absorption duration remains supplied by the selected patient absorption
+  profile.
+- Existing carbohydrate groups were migrated to a 10-minute global default,
+  preserving previous behavior until deliberately configured.
+- Historical meal-component snapshots remain immutable when patient or global
+  configuration changes or is removed.
+- Live verification confirmed a Fruit global default of 10 minutes, a temporary
+  patient-specific override of 25 minutes, and a new meal snapshot of 25
+  minutes with classification source `patient_carb_group_setting_v1`.
+- Earlier Fruit meal snapshots remained at 10 minutes.
+- The temporary patient-specific development override was removed after
+  verification.
+- No patient clinical-settings write API is exposed yet; authorization and
+  role enforcement must be implemented before exposing that administration
+  surface.
+- Patient-specific TensorFlow state remains system-managed and separate from
+  admin-controlled patient clinical configuration. Learned model state must
+  not silently rewrite clinical settings.
+
 Outstanding regression:
 - Verify explicit/manual meal absorption override semantics through the calculation endpoint.
 
 ---
 
 ### B2.2 — Meal consumption + macronutrient facts
-Status: IN PROGRESS
+Status: COMPLETE
 
 #### B2.2A — Macronutrient facts
 Status: COMPLETE
@@ -120,14 +152,21 @@ Consumption aggregation rule:
   derived as the sum of component `consumed_carbs_grams`.
 - Do not persist a misleading partial total as `Meal.consumed_carbs_grams`.
 
-Next:
+#### B2.2C — Consumption-aware absorption timeline
+Status: COMPLETE
 
-- Integrate actual consumption into the deterministic carbohydrate absorption
-  timeline.
-- Define how partial consumption affects the active timeline before changing
-  timeline calculation code.
-- Preserve historical planned meal/component snapshots.
-- Verify timeline replacement and consumption persistence semantics with tests.
+Implemented and verified:
+
+- Unknown consumption (`NULL`) uses planned component carbohydrate.
+- Known partial consumption uses `consumed_carbs_grams`.
+- Explicit zero consumption contributes zero carbohydrate.
+- Planned meal/component snapshots remain unchanged.
+- Consumption update flushes, rebuilds and stages the timeline, then commits once.
+- Timeline rebuild failure rolls the transaction back.
+- Live verification changed Bolognese consumption from unknown to explicit zero
+  and reduced the operational forecast from 53.877368 g to 53.277368 g, exactly
+  matching its 0.600000 g planned carbohydrate contribution.
+- Full backend suite before live verification: 207 passed.
 
 ### B2.3 — Warsaw-inspired delayed nutrient model
 Status: NEXT

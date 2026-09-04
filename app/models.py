@@ -303,6 +303,14 @@ class CarbGroupDefinition(Base):
         nullable=True,
     )
 
+    # System/global default only. Patient-specific clinical configuration may
+    # override this value. The resolved value is snapshotted into the meal.
+    default_absorption_delay_minutes = Column(
+        Integer,
+        nullable=False,
+        default=10,
+    )
+
     is_active = Column(
         Boolean,
         nullable=False,
@@ -337,6 +345,64 @@ class CarbGroupDefinition(Base):
             "OR default_absorption_profile_key IN "
             "('very_fast', 'fast', 'medium', 'slow')",
             name="ck_carb_group_definitions_absorption_profile",
+        ),
+        CheckConstraint(
+            "default_absorption_delay_minutes >= 0",
+            name="ck_carb_group_definitions_default_absorption_delay",
+        ),
+    )
+
+
+class PatientCarbGroupSetting(Base):
+    """Admin-managed patient-specific carbohydrate-group configuration."""
+
+    __tablename__ = "patient_carb_group_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    carb_group_definition_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("carb_group_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # NULL means inherit the system/global default for this field.
+    absorption_profile_key = Column(String(50), nullable=True)
+    absorption_delay_minutes = Column(Integer, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    patient = relationship("Patient")
+    carb_group_definition = relationship("CarbGroupDefinition")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "patient_id",
+            "carb_group_definition_id",
+            name="uq_patient_carb_group_settings_patient_group",
+        ),
+        CheckConstraint(
+            "absorption_profile_key IS NULL "
+            "OR absorption_profile_key IN "
+            "('very_fast', 'fast', 'medium', 'slow')",
+            name="ck_patient_carb_group_settings_profile",
+        ),
+        CheckConstraint(
+            "absorption_delay_minutes IS NULL "
+            "OR absorption_delay_minutes >= 0",
+            name="ck_patient_carb_group_settings_delay",
         ),
     )
 

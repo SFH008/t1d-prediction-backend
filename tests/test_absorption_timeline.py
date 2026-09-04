@@ -18,6 +18,7 @@ def _component(
     carbs_grams,
     delay_minutes,
     duration_minutes,
+    consumed_carbs_grams=None,
 ):
     meal = SimpleNamespace(
         meal_timestamp=meal_timestamp,
@@ -25,6 +26,11 @@ def _component(
 
     meal_group = SimpleNamespace(
         carbs_grams=Decimal(str(carbs_grams)),
+        consumed_carbs_grams=(
+            None
+            if consumed_carbs_grams is None
+            else Decimal(str(consumed_carbs_grams))
+        ),
         meal=meal,
     )
 
@@ -40,6 +46,70 @@ def _component(
 
     return absorption
 
+def test_build_component_curves_uses_planned_carbs_when_consumption_unknown():
+    component = _component(
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        carbs_grams=40,
+        consumed_carbs_grams=None,
+        delay_minutes=10,
+        duration_minutes=60,
+    )
+
+    curves = build_component_curves(
+        components=[component],
+    )
+
+    total = sum(
+        point.absorbed_carbs_grams
+        for point in curves[0]
+    )
+
+    assert total == Decimal("40")
+
+
+def test_build_component_curves_uses_consumed_carbs_when_known():
+    component = _component(
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        carbs_grams=40,
+        consumed_carbs_grams=20,
+        delay_minutes=10,
+        duration_minutes=60,
+    )
+
+    curves = build_component_curves(
+        components=[component],
+    )
+
+    total = sum(
+        point.absorbed_carbs_grams
+        for point in curves[0]
+    )
+
+    assert total == Decimal("20")
+
+
+def test_build_component_curves_preserves_explicit_zero_consumption():
+    component = _component(
+        patient_id=uuid4(),
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        carbs_grams=40,
+        consumed_carbs_grams=0,
+        delay_minutes=10,
+        duration_minutes=60,
+    )
+
+    curves = build_component_curves(
+        components=[component],
+    )
+
+    total = sum(
+        point.absorbed_carbs_grams
+        for point in curves[0]
+    )
+
+    assert total == Decimal("0")
 
 def test_build_component_curves_uses_snapshotted_component_values():
     patient_id = uuid4()

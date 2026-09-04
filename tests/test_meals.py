@@ -25,6 +25,7 @@ from app.models import (
     CarbGroupDefinition,
     Meal,
     MealCarbGroup,
+    PatientCarbGroupSetting,
 )
 
 from app.schema.schemas import (
@@ -280,10 +281,17 @@ class _ScalarResult:
 
 
 class _MealCreateSession:
-    def __init__(self, patient, definition, profile=None):
+    def __init__(
+        self,
+        patient,
+        definition,
+        profile=None,
+        patient_setting=None,
+    ):
         self.patient = patient
         self.definition = definition
         self.profile = profile
+        self.patient_setting = patient_setting
         self.added = []
         self.commit_called = False
         self.rollback_called = False
@@ -300,9 +308,12 @@ class _MealCreateSession:
             return _ScalarResult(self.definition)
 
         if self.execute_count == 4:
-            return _ScalarResult(self.profile)
+            return _ScalarResult(self.patient_setting)
 
         if self.execute_count == 5:
+            return _ScalarResult(self.profile)
+
+        if self.execute_count == 6:
             return _ScalarResult(self.added[0])
 
         raise AssertionError(
@@ -347,6 +358,7 @@ async def test_create_meal_uses_backend_carb_definition():
         group_name="Pasta, cooked",
         carb_factor_g_per_g=Decimal("0.28"),
         default_absorption_profile_key="slow",
+        default_absorption_delay_minutes=25,
         is_active=True,
     )
 
@@ -356,6 +368,7 @@ async def test_create_meal_uses_backend_carb_definition():
         profile_key="slow",
         profile_name="Slow",
         duration_minutes=300,
+        # The profile delay must no longer control component onset.
         absorption_delay_minutes=10,
         is_active=True,
     )
@@ -406,10 +419,10 @@ async def test_create_meal_uses_backend_carb_definition():
     assert component_absorption.patient_id == patient_id
     assert component_absorption.absorption_profile_id == profile.id
     assert component_absorption.absorption_profile_key == "slow"
-    assert component_absorption.absorption_delay_minutes == 10
+    assert component_absorption.absorption_delay_minutes == 25
     assert component_absorption.absorption_duration_minutes == 300
     assert component_absorption.curve_type == "linear"
-    assert component_absorption.classification_source == "carb_group_default_v1"
+    assert component_absorption.classification_source == "carb_group_default_v2"
     assert component_absorption.model_version == "deterministic_linear_v1"
 
     assert stored_group.group_number == 1
@@ -419,6 +432,77 @@ async def test_create_meal_uses_backend_carb_definition():
     assert stored_group.quantity_grams == Decimal("100")
     assert stored_group.carbs_grams == Decimal("28.0")
     assert meal.total_carbs_grams == Decimal("28.0")
+
+
+@pytest.mark.asyncio
+async def test_create_meal_prefers_patient_carb_group_setting():
+    patient_id = uuid4()
+
+    patient = SimpleNamespace(id=patient_id)
+    definition = CarbGroupDefinition(
+        id=uuid4(),
+        group_number=1,
+        group_key="pasta_cooked",
+        group_name="Pasta, cooked",
+        carb_factor_g_per_g=Decimal("0.28"),
+        default_absorption_profile_key="slow",
+        default_absorption_delay_minutes=10,
+        is_active=True,
+    )
+    patient_setting = PatientCarbGroupSetting(
+        id=uuid4(),
+        patient_id=patient_id,
+        carb_group_definition_id=definition.id,
+        absorption_profile_key="fast",
+        absorption_delay_minutes=25,
+        is_active=True,
+    )
+    profile = CarbAbsorptionProfile(
+        id=uuid4(),
+        patient_id=patient_id,
+        profile_key="fast",
+        profile_name="Fast",
+        duration_minutes=60,
+        absorption_delay_minutes=10,
+        is_active=True,
+    )
+    session = _MealCreateSession(
+        patient=patient,
+        definition=definition,
+        profile=profile,
+        patient_setting=patient_setting,
+    )
+    meal_create = MealCreate(
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        meal_category="meal",
+        carb_groups=[{"group_number": 1, "quantity_grams": 100}],
+    )
+
+    with (
+        patch(
+            "app.api.meals.build_patient_absorption_timeline",
+            AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "app.api.meals.stage_patient_absorption_timeline",
+            AsyncMock(),
+        ),
+    ):
+        await create_meal(
+            patient_id=patient_id,
+            meal_create=meal_create,
+            db=session,
+        )
+
+    component_absorption = session.added[1]
+    assert component_absorption.absorption_profile_key == "fast"
+    assert component_absorption.absorption_delay_minutes == 25
+    assert component_absorption.absorption_duration_minutes == 60
+    assert (
+        component_absorption.classification_source
+        == "patient_carb_group_setting_v1"
+    )
+
 
 @pytest.mark.asyncio
 async def test_create_meal_persists_fat_and_protein_grams():
@@ -433,6 +517,7 @@ async def test_create_meal_persists_fat_and_protein_grams():
         group_name="Bolognese",
         carb_factor_g_per_g=Decimal("0.06"),
         default_absorption_profile_key="slow",
+        default_absorption_delay_minutes=10,
         is_active=True,
     )
 
@@ -503,6 +588,7 @@ async def test_existing_meal_keeps_factor_snapshot_after_admin_change():
         group_name="Pasta, cooked",
         carb_factor_g_per_g=Decimal("0.28"),
         default_absorption_profile_key="slow",
+        default_absorption_delay_minutes=10,
         is_active=True,
     )
 
@@ -588,6 +674,7 @@ async def test_create_meal_stages_absorption_timeline_before_single_commit():
         group_name="Pasta, cooked",
         carb_factor_g_per_g=Decimal("0.28"),
         default_absorption_profile_key="slow",
+        default_absorption_delay_minutes=10,
         is_active=True,
     )
 
@@ -683,6 +770,7 @@ async def test_create_meal_rolls_back_if_absorption_timeline_fails():
         group_name="Pasta, cooked",
         carb_factor_g_per_g=Decimal("0.28"),
         default_absorption_profile_key="slow",
+        default_absorption_delay_minutes=10,
         is_active=True,
     )
 
@@ -859,6 +947,7 @@ async def test_update_meal_consumption_derives_consumed_carbs():
     meal = SimpleNamespace(
         id=meal_id,
         patient_id=patient_id,
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
         carb_groups=[meal_group],
     )
 
@@ -875,11 +964,15 @@ async def test_update_meal_consumption_derives_consumed_carbs():
         def __init__(self):
             self.commit_called = False
             self.rollback_called = False
+            self.flush_count = 0
 
         async def execute(self, stmt):
             return SimpleNamespace(
                 scalar_one_or_none=lambda: meal
             )
+
+        async def flush(self):
+            self.flush_count += 1
 
         async def commit(self):
             self.commit_called = True
@@ -889,12 +982,22 @@ async def test_update_meal_consumption_derives_consumed_carbs():
 
     session = _ConsumptionSession()
 
-    updated = await update_meal_consumption(
-        patient_id=patient_id,
-        meal_id=meal_id,
-        consumption_update=update,
-        db=session,
-    )
+    with (
+        patch(
+            "app.api.meals.build_patient_absorption_timeline",
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "app.api.meals.stage_patient_absorption_timeline",
+            new=AsyncMock(),
+        ),
+    ):
+        updated = await update_meal_consumption(
+            patient_id=patient_id,
+            meal_id=meal_id,
+            consumption_update=update,
+            db=session,
+        )
 
     group = updated.carb_groups[0]
 
@@ -903,6 +1006,97 @@ async def test_update_meal_consumption_derives_consumed_carbs():
 
     assert group.consumed_quantity_grams == Decimal("30")
     assert group.consumed_carbs_grams == Decimal("1.8")
+
+    assert session.commit_called is True
+    assert session.flush_count == 1
+    assert session.rollback_called is False
+
+@pytest.mark.asyncio
+async def test_update_meal_consumption_rebuilds_timeline_before_commit():
+    patient_id = uuid4()
+    meal_id = uuid4()
+
+    meal_group = MealCarbGroup(
+        id=uuid4(),
+        meal_id=meal_id,
+        group_number=10,
+        group_key="bolognese",
+        group_name="Bolognese",
+        quantity_grams=Decimal("50.0"),
+        carb_factor_g_per_g=Decimal("0.06"),
+        carbs_grams=Decimal("3.0"),
+    )
+
+    meal = SimpleNamespace(
+        id=meal_id,
+        patient_id=patient_id,
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        carb_groups=[meal_group],
+    )
+
+    update = MealConsumptionUpdate(
+        carb_groups=[
+            {
+                "group_number": 10,
+                "consumed_quantity_grams": 30,
+            }
+        ]
+    )
+
+    class _ConsumptionSession:
+        def __init__(self):
+            self.commit_called = False
+            self.rollback_called = False
+            self.flush_count = 0
+
+        async def execute(self, stmt):
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: meal
+            )
+
+        async def flush(self):
+            self.flush_count += 1
+
+        async def commit(self):
+            self.commit_called = True
+
+        async def rollback(self):
+            self.rollback_called = True
+
+    session = _ConsumptionSession()
+
+    built_timeline = SimpleNamespace()
+
+    with (
+        patch(
+            "app.api.meals.build_patient_absorption_timeline",
+            AsyncMock(return_value=built_timeline),
+        ) as build_timeline,
+        patch(
+            "app.api.meals.stage_patient_absorption_timeline",
+            AsyncMock(),
+        ) as stage_timeline,
+    ):
+        await update_meal_consumption(
+            patient_id=patient_id,
+            meal_id=meal_id,
+            consumption_update=update,
+            db=session,
+        )
+
+    assert session.flush_count == 1
+
+    build_timeline.assert_awaited_once_with(
+        db=session,
+        patient_id=patient_id,
+        anchor_timestamp=meal.meal_timestamp,
+    )
+
+    stage_timeline.assert_awaited_once_with(
+        db=session,
+        patient_id=patient_id,
+        timeline=built_timeline,
+    )
 
     assert session.commit_called is True
     assert session.rollback_called is False
@@ -1182,3 +1376,78 @@ async def test_update_meal_consumption_persists_zero_consumption():
 
     db.commit.assert_awaited_once()
     db.rollback.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_update_meal_consumption_rolls_back_when_timeline_rebuild_fails():
+    patient_id = uuid4()
+    meal_id = uuid4()
+
+    meal_group = MealCarbGroup(
+        id=uuid4(),
+        meal_id=meal_id,
+        group_number=2,
+        group_key="fruit",
+        group_name="Fruit",
+        quantity_grams=Decimal("40.0"),
+        carb_factor_g_per_g=Decimal("1.0"),
+        carbs_grams=Decimal("40.0"),
+    )
+
+    meal = SimpleNamespace(
+        id=meal_id,
+        patient_id=patient_id,
+        meal_timestamp=datetime(2026, 9, 4, 12, 0),
+        carb_groups=[meal_group],
+    )
+
+    update = MealConsumptionUpdate(
+        carb_groups=[
+            {
+                "group_number": 2,
+                "consumed_quantity_grams": 20,
+            }
+        ]
+    )
+
+    class _ConsumptionSession:
+        def __init__(self):
+            self.commit_called = False
+            self.rollback_called = False
+            self.flush_count = 0
+
+        async def execute(self, stmt):
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: meal
+            )
+
+        async def flush(self):
+            self.flush_count += 1
+
+        async def commit(self):
+            self.commit_called = True
+
+        async def rollback(self):
+            self.rollback_called = True
+
+    session = _ConsumptionSession()
+
+    with patch(
+        "app.api.meals.build_patient_absorption_timeline",
+        new=AsyncMock(
+            side_effect=RuntimeError("timeline rebuild failed")
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="timeline rebuild failed",
+        ):
+            await update_meal_consumption(
+                patient_id=patient_id,
+                meal_id=meal_id,
+                consumption_update=update,
+                db=session,
+            )
+
+    assert session.flush_count == 1
+    assert session.commit_called is False
+    assert session.rollback_called is True

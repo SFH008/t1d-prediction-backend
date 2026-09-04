@@ -306,6 +306,12 @@ class CarbGroupDefinitionUpdate(BaseModel):
         pattern=r"^(very_fast|fast|medium|slow)$",
     )
 
+    default_absorption_delay_minutes: Optional[int] = Field(
+        None,
+        ge=0,
+        le=1440,
+    )
+
     is_active: Optional[bool] = None
 
 
@@ -316,6 +322,36 @@ class CarbGroupDefinitionResponse(BaseModel):
     group_name: str
     carb_factor_g_per_g: float
     default_absorption_profile_key: Optional[str]
+    default_absorption_delay_minutes: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PatientCarbGroupSettingUpdate(BaseModel):
+    """Admin-only patient-specific carbohydrate-group override."""
+
+    absorption_profile_key: Optional[str] = Field(
+        None,
+        pattern=r"^(very_fast|fast|medium|slow)$",
+    )
+    absorption_delay_minutes: Optional[int] = Field(
+        None,
+        ge=0,
+        le=1440,
+    )
+    is_active: Optional[bool] = None
+
+
+class PatientCarbGroupSettingResponse(BaseModel):
+    id: UUID
+    patient_id: UUID
+    carb_group_definition_id: UUID
+    absorption_profile_key: Optional[str]
+    absorption_delay_minutes: Optional[int]
     is_active: bool
     created_at: datetime
     updated_at: datetime
