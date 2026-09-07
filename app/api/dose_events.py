@@ -97,7 +97,7 @@ async def _record_administered_dose(
         insulin_type="bolus",
         dose_units=actual_units,
         timestamp=actual_timestamp,
-        delivery_method=delivery_method or "pump",
+        delivery_method=delivery_method,
         source="meal_dose_tracker",
     )
 

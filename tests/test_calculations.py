@@ -24,6 +24,7 @@ from app.services.meal_absorption import (
 
 from app.models import (
     CarbAbsorptionProfile,
+    DoseStrategySettings,
     Meal,
     MealCalculation,
     MealComponentAbsorption,
@@ -252,6 +253,66 @@ def test_split_dose_applies_fat_protein_addon_before_split():
     assert result.effective_carbohydrate_grams == Decimal("60")
     assert result.dose_1_carbohydrate_grams == Decimal("30")
     assert result.dose_2_carbohydrate_grams == Decimal("30")
+
+def test_calculation_fat_protein_snapshot_uses_meal_and_patient_configuration():
+    from app.api.calculations import _calculate_fat_protein_snapshot
+
+    meal = Meal(
+        fat_grams=Decimal("10.0"),
+        protein_grams=Decimal("20.0"),
+    )
+
+    strategy = DoseStrategySettings(
+        fat_protein_mode="advisory",
+        fat_protein_scaling_percent=Decimal("50"),
+    )
+
+    result = _calculate_fat_protein_snapshot(
+        meal=meal,
+        strategy=strategy,
+    )
+
+    assert result.fat_grams == Decimal("10.0")
+    assert result.protein_grams == Decimal("20.0")
+    assert result.fat_kcal == Decimal("90.0")
+    assert result.protein_kcal == Decimal("80.0")
+    assert result.total_fat_protein_kcal == Decimal("170.0")
+    assert result.fat_protein_units == Decimal("1.7")
+    assert (
+        result.theoretical_carb_equivalent_grams
+        == Decimal("17.0")
+    )
+    assert result.scaling_percent == Decimal("50")
+    assert result.scaled_carb_equivalent_grams == Decimal("8.5")
+
+    # Advisory mode models the delayed contribution but does not make
+    # it eligible for insulin dosing.
+    assert result.effective_carb_equivalent_grams == Decimal("0")
+
+
+def test_calculation_fat_protein_snapshot_handles_zero_nutrition_facts():
+    from app.api.calculations import _calculate_fat_protein_snapshot
+
+    meal = Meal(
+        fat_grams=Decimal("0"),
+        protein_grams=Decimal("0"),
+    )
+
+    strategy = DoseStrategySettings(
+        fat_protein_mode="disabled",
+        fat_protein_scaling_percent=Decimal("0"),
+    )
+
+    result = _calculate_fat_protein_snapshot(
+        meal=meal,
+        strategy=strategy,
+    )
+
+    assert result.total_fat_protein_kcal == Decimal("0")
+    assert result.fat_protein_units == Decimal("0")
+    assert result.theoretical_carb_equivalent_grams == Decimal("0")
+    assert result.scaled_carb_equivalent_grams == Decimal("0")
+    assert result.effective_carb_equivalent_grams == Decimal("0")
 
 def _tracker_test_calculation(*, calculation_id=None):
     return MealCalculation(

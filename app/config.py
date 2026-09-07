@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = [
         "http://localhost:3001",
         "http://localhost:8080",
+        "http://192.168.2.120:5173",
     ]
 
     class Config:

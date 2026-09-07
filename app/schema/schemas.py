@@ -491,6 +491,27 @@ class MealCalculationResponse(BaseModel):
     fat_protein_addon_grams: Optional[float] = None
     effective_carbohydrate_grams: Optional[float] = None
 
+    # B2.3 Warsaw-inspired delayed nutrient snapshot.
+    # These fields are distinct from the legacy calculation-v3
+    # fat_protein_addon_* fields above.
+    fat_protein_model_mode: Optional[str] = None
+    fat_protein_model_scaling_percent: Optional[float] = None
+
+    fat_protein_fat_grams: Optional[float] = None
+    fat_protein_protein_grams: Optional[float] = None
+
+    fat_protein_fat_kcal: Optional[float] = None
+    fat_protein_protein_kcal: Optional[float] = None
+    fat_protein_total_kcal: Optional[float] = None
+
+    fat_protein_units: Optional[float] = None
+
+    fat_protein_theoretical_carb_equivalent_grams: Optional[float] = None
+    fat_protein_scaled_carb_equivalent_grams: Optional[float] = None
+    fat_protein_effective_carb_equivalent_grams: Optional[float] = None
+
+    fat_protein_model_version: Optional[str] = None
+
     absorption_profile_id: Optional[UUID] = None
     absorption_profile_key: Optional[str] = None
     absorption_duration_minutes: Optional[int] = None
@@ -526,6 +547,47 @@ class MealCalculationResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class AdaptiveMealCalculationResponse(BaseModel):
+    """
+    Immutable B2.4a meal-accounting snapshot.
+
+    remaining_meal_requirement_units is accounting state only. It is not yet
+    a safe immediate insulin recommendation.
+    """
+
+    id: UUID
+    patient_id: UUID
+    meal_id: UUID
+    calculation_id: UUID
+    calculated_at: datetime
+
+    consumed_carbs_grams: Optional[float]
+    fat_protein_effective_carb_equivalent_grams: Optional[float]
+    insulin_to_carb_ratio: float
+    actual_administered_units: float
+
+    carb_insulin_requirement_units: Optional[float]
+    fat_protein_insulin_requirement_units: Optional[float]
+    total_meal_requirement_units: Optional[float]
+    remaining_meal_requirement_units: Optional[float]
+
+    adaptive_calculation_version: str
+    adaptive_model_version: str
+
+    class Config:
+        from_attributes = True
+
+class AdaptiveMealModelsResponse(BaseModel):
+    """
+    Parallel adaptive model results for presentation.
+
+    The primary model is explicit. Alternative models are returned as a
+    generic collection so additional independently validated models can be
+    exposed later without changing the API shape.
+    """
+
+    primary: AdaptiveMealCalculationResponse
+    alternatives: List[AdaptiveMealCalculationResponse]
 
 # ============================================================================
 # Frontend Meal Plan Read Schemas
@@ -621,7 +683,7 @@ class MealDoseEventConfirm(BaseModel):
     """Confirm that a planned dose was administered as planned."""
     actual_units: float = Field(..., gt=0, le=100)
     actual_timestamp: datetime
-    delivery_method: Optional[str] = "pump"
+    delivery_method: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -630,7 +692,7 @@ class MealDoseEventAdjust(BaseModel):
     actual_units: float = Field(..., gt=0, le=100)
     actual_timestamp: datetime
     adjustment_reason: str = Field(..., min_length=1, max_length=100)
-    delivery_method: Optional[str] = "pump"
+    delivery_method: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -726,6 +788,27 @@ class UserSettingsResponse(UserSettingsUpdate):
     class Config:
         from_attributes = True
 
+
+class ClinicalModelSettingUpdate(BaseModel):
+    """
+    Administrative update to model exposure.
+
+    Model identity, version and role are immutable through this endpoint.
+    """
+    enabled: bool
+
+
+class ClinicalModelSettingResponse(BaseModel):
+    id: UUID
+    model_key: str
+    model_version: str
+    role: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # ============================================================================
 # Time-of-Day Profile Schemas

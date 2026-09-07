@@ -696,6 +696,33 @@ class MealCalculation(Base):
     fat_protein_addon_grams = Column(Numeric(8, 1))
     effective_carbohydrate_grams = Column(Numeric(8, 1))
 
+    # B2.3 Warsaw-inspired delayed nutrient snapshot.
+    # Explicitly separate from the legacy calculation-v3
+    # fat_protein_addon_* fields above.
+    fat_protein_model_mode = Column(String(20))
+    fat_protein_model_scaling_percent = Column(Numeric(5, 2))
+
+    fat_protein_fat_grams = Column(Numeric(8, 1))
+    fat_protein_protein_grams = Column(Numeric(8, 1))
+
+    fat_protein_fat_kcal = Column(Numeric(10, 2))
+    fat_protein_protein_kcal = Column(Numeric(10, 2))
+    fat_protein_total_kcal = Column(Numeric(10, 2))
+
+    fat_protein_units = Column(Numeric(10, 4))
+
+    fat_protein_theoretical_carb_equivalent_grams = Column(
+        Numeric(10, 2)
+    )
+    fat_protein_scaled_carb_equivalent_grams = Column(
+        Numeric(10, 2)
+    )
+    fat_protein_effective_carb_equivalent_grams = Column(
+        Numeric(10, 2)
+    )
+
+    fat_protein_model_version = Column(String(50))
+
     absorption_profile_id = Column(UUID(as_uuid=True))
     absorption_profile_key = Column(String(50))
     absorption_duration_minutes = Column(Integer)
@@ -814,6 +841,113 @@ class MealDoseEvent(Base):
         ),
     )
 
+class AdaptiveMealCalculation(Base):
+    """
+    Immutable B2.4a adaptive meal-accounting snapshot.
+
+    This records how much insulin the meal currently requires based on actual
+    consumption and actual meal insulin already administered.
+
+    It is not yet a safe immediate insulin recommendation. Accumulated
+    COB/FP/IOB, current physiological context and safety constraints belong to
+    B2.4b-B2.4d.
+    """
+
+    __tablename__ = "adaptive_meal_calculations"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    meal_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    calculation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("meal_calculations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    calculated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
+
+    # Persisted-state input snapshots.
+    #
+    # NULL consumed carbohydrate means complete actual meal consumption is
+    # still unknown. Planned carbohydrate is never substituted here.
+    consumed_carbs_grams = Column(
+        Numeric(10, 3),
+        nullable=True,
+    )
+
+    # Warsaw-specific snapshot. NULL means this field does not apply
+    # to the adaptive model that produced this row.
+    fat_protein_effective_carb_equivalent_grams = Column(
+        Numeric(10, 3),
+        nullable=True,
+    )
+
+    insulin_to_carb_ratio = Column(
+        Numeric(10, 3),
+        nullable=False,
+    )
+
+    # Actual administered meal insulin only. Planned insulin is never counted.
+    actual_administered_units = Column(
+        Numeric(10, 3),
+        nullable=False,
+    )
+
+    # Derived B2.4a meal-accounting outputs.
+    carb_insulin_requirement_units = Column(
+        Numeric(10, 3),
+        nullable=True,
+    )
+
+    # Warsaw-specific derived output. NULL for non-Warsaw models.
+    fat_protein_insulin_requirement_units = Column(
+        Numeric(10, 3),
+        nullable=True,
+    )
+
+    total_meal_requirement_units = Column(
+        Numeric(10, 3),
+        nullable=True,
+    )
+
+    remaining_meal_requirement_units = Column(
+        Numeric(10, 3),
+        nullable=True,
+    )
+
+    adaptive_calculation_version = Column(
+        String(50),
+        nullable=False,
+    )
+
+    # Identifies the independent model branch that produced this snapshot.
+    adaptive_model_version = Column(
+        String(50),
+        nullable=False,
+    )
 
 class Activity(Base):
     """Physical activity and exercise records."""
@@ -901,6 +1035,20 @@ class DoseStrategySettings(Base):
         default=Decimal("0.05"),
     )
     fat_protein_addon_percent = Column(Numeric(5, 2), nullable=False, default=0)
+
+    # B2.3 patient-specific clinical configuration.
+    # These fields are separate from the legacy fat_protein_addon_percent
+    # calculation-v3 semantics above.
+    fat_protein_mode = Column(
+        String(20),
+        nullable=False,
+        default="disabled",
+    )
+    fat_protein_scaling_percent = Column(
+        Numeric(5, 2),
+        nullable=False,
+        default=Decimal("0"),
+    )
 
     total_daily_dose_units = Column(Numeric(8, 2))
     basal_share_percent = Column(Numeric(5, 2))
@@ -1240,6 +1388,64 @@ class PatientAbsorptionForecast(Base):
     )
 
     patient = relationship("Patient")
+
+class ClinicalModelSetting(Base):
+    """
+    Global administrative configuration for a calculation model.
+
+    This is system/back-office configuration. It is deliberately separate
+    from patient settings, patient-specific clinical configuration and model
+    training metadata.
+    """
+    __tablename__ = "clinical_model_settings"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "model_key",
+            "model_version",
+            name="uq_clinical_model_settings_identity",
+        ),
+    )
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    model_key = Column(
+        String(100),
+        nullable=False,
+    )
+
+    model_version = Column(
+        String(100),
+        nullable=False,
+    )
+
+    role = Column(
+        String(30),
+        nullable=False,
+    )
+
+    enabled = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
 
 class ModelTrainingLog(Base):
     """Model training metadata and performance metrics."""

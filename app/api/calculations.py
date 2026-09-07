@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import (
+    AdaptiveMealCalculation,
     CarbAbsorptionProfile,
     DoseStrategySettings,
     Meal,
@@ -29,11 +30,16 @@ from app.models import (
     TherapyLimit,
     TimeOfDayProfile,
     UserSettings,
+    ClinicalModelSetting,
 )
+
 from app.schema.schemas import (
+    AdaptiveMealCalculationResponse,
     MealCalculationCreate,
     MealCalculationResponse,
+    AdaptiveMealModelsResponse,
 )
+
 from app.services.therapy_context import (
     TherapyContextError,
     resolve_therapy_context,
@@ -43,6 +49,22 @@ from app.services.meal_absorption import (
     MealAbsorptionSummary,
     resolve_meal_absorption_summary,
 )
+
+from app.services.fat_protein_model import (
+    FAT_PROTEIN_MODEL_VERSION,
+    FatProteinModelResult,
+    calculate_fat_protein_model,
+)
+
+from app.services.adaptive_dose import (
+    AdaptiveMealRequirement,
+    calculate_primary_adaptive_meal_requirement_from_state,
+    calculate_warsaw_adaptive_meal_requirement_from_state,
+)
+
+ADAPTIVE_MEAL_CALCULATION_VERSION = "adaptive_meal_requirement_v1"
+PRIMARY_ADAPTIVE_MODEL_VERSION = "primary_v1"
+WARSAW_ADAPTIVE_MODEL_VERSION = "warsaw_v1"
 
 router = APIRouter(tags=["Meal Calculations"])
 
@@ -336,6 +358,70 @@ def _absorption_profile_key_for_meal(meal: Meal) -> tuple[str, str]:
         return "slow", "meal_category_rule_v1"
     return "medium", "meal_category_rule_v1"
 
+def _calculate_fat_protein_snapshot(
+    *,
+    meal: Meal,
+    strategy: DoseStrategySettings,
+) -> FatProteinModelResult:
+    """Resolve the B2.3 delayed-nutrient snapshot for one calculation."""
+    return calculate_fat_protein_model(
+        fat_grams=(
+            meal.fat_grams
+            if meal.fat_grams is not None
+            else Decimal("0")
+        ),
+        protein_grams=(
+            meal.protein_grams
+            if meal.protein_grams is not None
+            else Decimal("0")
+        ),
+        mode=strategy.fat_protein_mode,
+        scaling_percent=strategy.fat_protein_scaling_percent,
+    )
+
+def _build_adaptive_meal_calculation(
+    *,
+    patient_id: UUID,
+    meal_id: UUID,
+    calculation_id: UUID,
+    insulin_to_carb_ratio: Decimal,
+    result: AdaptiveMealRequirement,
+    adaptive_model_version: str,
+) -> AdaptiveMealCalculation:
+    """
+    Build one immutable B2.4a persistence snapshot from a domain result.
+
+    This helper performs no therapy-context resolution and no physiological
+    recommendation logic. The ICR supplied here must come from the immutable
+    originating MealCalculation snapshot.
+    """
+    return AdaptiveMealCalculation(
+        patient_id=patient_id,
+        meal_id=meal_id,
+        calculation_id=calculation_id,
+        consumed_carbs_grams=result.consumed_carbs_grams,
+        fat_protein_effective_carb_equivalent_grams=(
+            result.fat_protein_effective_carb_equivalent_grams
+        ),
+        insulin_to_carb_ratio=Decimal(str(insulin_to_carb_ratio)),
+        actual_administered_units=result.actual_administered_units,
+        carb_insulin_requirement_units=(
+            result.carb_insulin_requirement_units
+        ),
+        fat_protein_insulin_requirement_units=(
+            result.fat_protein_insulin_requirement_units
+        ),
+        total_meal_requirement_units=(
+            result.total_meal_requirement_units
+        ),
+        remaining_meal_requirement_units=(
+            result.remaining_meal_requirement_units
+        ),
+        adaptive_calculation_version=(
+            ADAPTIVE_MEAL_CALCULATION_VERSION
+        ),
+        adaptive_model_version=adaptive_model_version,
+    )
 
 def _planned_dose_events_for_calculation(
     *,
@@ -531,6 +617,11 @@ async def calculate_meal(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    fat_protein_snapshot = _calculate_fat_protein_snapshot(
+        meal=meal,
+        strategy=strategy,
+    )
+
     calculation = MealCalculation(
         meal_id=meal.id,
         patient_id=patient_id,
@@ -548,6 +639,28 @@ async def calculate_meal(
         fat_protein_addon_percent=result.fat_protein_addon_percent,
         fat_protein_addon_grams=result.fat_protein_addon_grams,
         effective_carbohydrate_grams=result.effective_carbohydrate_grams,
+        fat_protein_model_mode=fat_protein_snapshot.mode,
+        fat_protein_model_scaling_percent=(
+            fat_protein_snapshot.scaling_percent
+        ),
+        fat_protein_fat_grams=fat_protein_snapshot.fat_grams,
+        fat_protein_protein_grams=fat_protein_snapshot.protein_grams,
+        fat_protein_fat_kcal=fat_protein_snapshot.fat_kcal,
+        fat_protein_protein_kcal=fat_protein_snapshot.protein_kcal,
+        fat_protein_total_kcal=(
+            fat_protein_snapshot.total_fat_protein_kcal
+        ),
+        fat_protein_units=fat_protein_snapshot.fat_protein_units,
+        fat_protein_theoretical_carb_equivalent_grams=(
+            fat_protein_snapshot.theoretical_carb_equivalent_grams
+        ),
+        fat_protein_scaled_carb_equivalent_grams=(
+            fat_protein_snapshot.scaled_carb_equivalent_grams
+        ),
+        fat_protein_effective_carb_equivalent_grams=(
+            fat_protein_snapshot.effective_carb_equivalent_grams
+        ),
+        fat_protein_model_version=FAT_PROTEIN_MODEL_VERSION,
         absorption_profile_id=absorption_summary.profile_id,
         absorption_profile_key=absorption_summary.profile_key,
         absorption_duration_minutes=absorption_summary.duration_minutes,
@@ -599,3 +712,421 @@ async def calculate_meal(
         ) from exc
 
     return calculation
+
+@router.post(
+    "/patients/{patient_id}/meals/{meal_id}/calculations/{calculation_id}/adaptive",
+    response_model=AdaptiveMealCalculationResponse,
+    status_code=201,
+)
+async def calculate_adaptive_meal(
+    patient_id: UUID,
+    meal_id: UUID,
+    calculation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create one immutable B2.4a meal-accounting snapshot.
+
+    Authoritative inputs come only from persisted server state:
+
+      - the originating MealCalculation therapy/B2.3 snapshot
+      - current actual component consumption
+      - actual executed MealDoseEvent state
+
+    Planned carbohydrate and planned insulin are never treated as actual.
+
+    remaining_meal_requirement_units is meal accounting only. It is not yet
+    a safe immediate insulin recommendation.
+    """
+
+    calculation_result = await db.execute(
+        select(MealCalculation).where(
+            MealCalculation.id == calculation_id
+        )
+    )
+    original_calculation = calculation_result.scalar_one_or_none()
+
+    if (
+        original_calculation is None
+        or original_calculation.patient_id != patient_id
+        or original_calculation.meal_id != meal_id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Meal calculation not found",
+        )
+
+    if original_calculation.carb_factor_g_per_unit is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Originating calculation lacks adaptive dosing snapshots",
+        )
+
+    component_result = await db.execute(
+        select(MealCarbGroup)
+        .where(
+            MealCarbGroup.meal_id == meal_id,
+        )
+        .order_by(MealCarbGroup.group_number)
+    )
+    components = component_result.scalars().all()
+
+    dose_event_result = await db.execute(
+        select(MealDoseEvent)
+        .where(
+            MealDoseEvent.calculation_id == calculation_id,
+        )
+        .order_by(MealDoseEvent.dose_number)
+    )
+    dose_events = dose_event_result.scalars().all()
+
+    # Establish an explicit ORM -> domain boundary.
+    #
+    # The B2.4a service intentionally consumes only actual state. Planned
+    # carbohydrate and planned insulin fields are not supplied.
+    component_state = [
+        {
+            "consumed_carbs_grams": component.consumed_carbs_grams,
+        }
+        for component in components
+    ]
+
+    dose_event_state = [
+        {
+            "status": dose_event.status,
+            "actual_units": dose_event.actual_units,
+        }
+        for dose_event in dose_events
+    ]
+
+    result = calculate_primary_adaptive_meal_requirement_from_state(
+        components=components,
+        insulin_to_carb_ratio=original_calculation.carb_factor_g_per_unit,
+        dose_events=dose_events,
+        primary_fat_protein_addon_percent=(
+            original_calculation.fat_protein_addon_percent
+        ),
+    )
+
+    adaptive_calculation = _build_adaptive_meal_calculation(
+        patient_id=patient_id,
+        meal_id=meal_id,
+        calculation_id=calculation_id,
+        insulin_to_carb_ratio=(
+            original_calculation.carb_factor_g_per_unit
+        ),
+        result=result,
+        adaptive_model_version=PRIMARY_ADAPTIVE_MODEL_VERSION,
+    )
+
+    try:
+        db.add(adaptive_calculation)
+        await db.commit()
+        await db.refresh(adaptive_calculation)
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist adaptive meal calculation",
+        ) from exc
+
+    return adaptive_calculation
+
+
+
+@router.post(
+    "/patients/{patient_id}/meals/{meal_id}/calculations/{calculation_id}/adaptive/warsaw",
+    response_model=AdaptiveMealCalculationResponse,
+    status_code=201,
+)
+async def calculate_warsaw_adaptive_meal(
+    patient_id: UUID,
+    meal_id: UUID,
+    calculation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create one immutable Warsaw v1 adaptive meal-accounting snapshot.
+
+    Warsaw is an independent alternative model. It consumes the immutable
+    Warsaw fat/protein snapshot from the originating MealCalculation and
+    never consumes the Primary fat/protein add-on parameter.
+
+    Planned carbohydrate and planned insulin are never treated as actual.
+
+    remaining_meal_requirement_units is meal accounting only. It is not yet
+    a safe immediate insulin recommendation.
+    """
+
+    calculation_result = await db.execute(
+        select(MealCalculation).where(
+            MealCalculation.id == calculation_id
+        )
+    )
+    original_calculation = calculation_result.scalar_one_or_none()
+
+    if (
+        original_calculation is None
+        or original_calculation.patient_id != patient_id
+        or original_calculation.meal_id != meal_id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Meal calculation not found",
+        )
+
+    if (
+        original_calculation.carb_factor_g_per_unit is None
+        or original_calculation.fat_protein_effective_carb_equivalent_grams
+        is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Originating calculation lacks Warsaw adaptive snapshots",
+        )
+
+    component_result = await db.execute(
+        select(MealCarbGroup)
+        .where(
+            MealCarbGroup.meal_id == meal_id,
+        )
+        .order_by(MealCarbGroup.group_number)
+    )
+    components = component_result.scalars().all()
+
+    dose_event_result = await db.execute(
+        select(MealDoseEvent)
+        .where(
+            MealDoseEvent.calculation_id == calculation_id,
+        )
+        .order_by(MealDoseEvent.dose_number)
+    )
+    dose_events = dose_event_result.scalars().all()
+
+    result = calculate_warsaw_adaptive_meal_requirement_from_state(
+        components=components,
+        fat_protein_effective_carb_equivalent_grams=(
+            original_calculation
+            .fat_protein_effective_carb_equivalent_grams
+        ),
+        insulin_to_carb_ratio=(
+            original_calculation.carb_factor_g_per_unit
+        ),
+        dose_events=dose_events,
+    )
+
+    adaptive_calculation = _build_adaptive_meal_calculation(
+        patient_id=patient_id,
+        meal_id=meal_id,
+        calculation_id=calculation_id,
+        insulin_to_carb_ratio=(
+            original_calculation.carb_factor_g_per_unit
+        ),
+        result=result,
+        adaptive_model_version=WARSAW_ADAPTIVE_MODEL_VERSION,
+    )
+
+    try:
+        db.add(adaptive_calculation)
+        await db.commit()
+        await db.refresh(adaptive_calculation)
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist Warsaw adaptive meal calculation",
+        ) from exc
+
+    return adaptive_calculation
+
+@router.post(
+    "/patients/{patient_id}/meals/{meal_id}/calculations/{calculation_id}/adaptive/models",
+    response_model=AdaptiveMealModelsResponse,
+    status_code=201,
+)
+async def calculate_adaptive_models(
+    patient_id: UUID,
+    meal_id: UUID,
+    calculation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create parallel immutable adaptive model snapshots.
+
+    The Primary model always executes.
+
+    Alternative models execute only when enabled by global back-office
+    clinical-model configuration.
+
+    All branches consume the same authoritative persisted meal state and
+    actual insulin state. Model mathematics remain independent and results
+    are persisted together in one transaction.
+    """
+    calculation_result = await db.execute(
+        select(MealCalculation).where(
+            MealCalculation.id == calculation_id
+        )
+    )
+    original_calculation = calculation_result.scalar_one_or_none()
+
+    if (
+        original_calculation is None
+        or original_calculation.patient_id != patient_id
+        or original_calculation.meal_id != meal_id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Meal calculation not found",
+        )
+
+    # Primary requires its historical ICR snapshot and its own immutable
+    # fat/protein add-on parameter. It never consumes Warsaw state.
+    if (
+        original_calculation.carb_factor_g_per_unit is None
+        or original_calculation.fat_protein_addon_percent is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Originating calculation lacks adaptive dosing snapshots",
+        )
+
+    component_result = await db.execute(
+        select(MealCarbGroup)
+        .where(
+            MealCarbGroup.meal_id == meal_id,
+        )
+        .order_by(MealCarbGroup.group_number)
+    )
+    components = component_result.scalars().all()
+
+    dose_event_result = await db.execute(
+        select(MealDoseEvent)
+        .where(
+            MealDoseEvent.calculation_id == calculation_id,
+        )
+        .order_by(MealDoseEvent.dose_number)
+    )
+    dose_events = dose_event_result.scalars().all()
+
+    model_setting_result = await db.execute(
+        select(ClinicalModelSetting)
+        .where(
+            ClinicalModelSetting.enabled.is_(True),
+        )
+        .order_by(
+            ClinicalModelSetting.role,
+            ClinicalModelSetting.model_key,
+            ClinicalModelSetting.model_version,
+        )
+    )
+    enabled_models = model_setting_result.scalars().all()
+
+    # ---------------------------------------------------------------
+    # Primary branch
+    # ---------------------------------------------------------------
+    #
+    # Primary always executes. Its calculation is independent of every
+    # alternative model and consumes only Primary-specific snapshots.
+    primary_result = calculate_primary_adaptive_meal_requirement_from_state(
+        components=components,
+        insulin_to_carb_ratio=(
+            original_calculation.carb_factor_g_per_unit
+        ),
+        dose_events=dose_events,
+        primary_fat_protein_addon_percent=(
+            original_calculation.fat_protein_addon_percent
+        ),
+    )
+
+    primary_snapshot = _build_adaptive_meal_calculation(
+        patient_id=patient_id,
+        meal_id=meal_id,
+        calculation_id=calculation_id,
+        insulin_to_carb_ratio=(
+            original_calculation.carb_factor_g_per_unit
+        ),
+        result=primary_result,
+        adaptive_model_version=PRIMARY_ADAPTIVE_MODEL_VERSION,
+    )
+
+    snapshots = [primary_snapshot]
+    alternatives = []
+
+    # ---------------------------------------------------------------
+    # Alternative branches
+    # ---------------------------------------------------------------
+    #
+    # Model exposure comes exclusively from back-office configuration.
+    # Each enabled alternative remains mathematically independent.
+    warsaw_enabled = any(
+        model.model_key == "warsaw"
+        and model.model_version == WARSAW_ADAPTIVE_MODEL_VERSION
+        and model.role == "alternative"
+        for model in enabled_models
+    )
+
+    if warsaw_enabled:
+        if (
+            original_calculation
+            .fat_protein_effective_carb_equivalent_grams
+            is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Originating calculation lacks Warsaw adaptive snapshots",
+            )
+
+        warsaw_result = (
+            calculate_warsaw_adaptive_meal_requirement_from_state(
+                components=components,
+                fat_protein_effective_carb_equivalent_grams=(
+                    original_calculation
+                    .fat_protein_effective_carb_equivalent_grams
+                ),
+                insulin_to_carb_ratio=(
+                    original_calculation.carb_factor_g_per_unit
+                ),
+                dose_events=dose_events,
+            )
+        )
+
+        warsaw_snapshot = _build_adaptive_meal_calculation(
+            patient_id=patient_id,
+            meal_id=meal_id,
+            calculation_id=calculation_id,
+            insulin_to_carb_ratio=(
+                original_calculation.carb_factor_g_per_unit
+            ),
+            result=warsaw_result,
+            adaptive_model_version=WARSAW_ADAPTIVE_MODEL_VERSION,
+        )
+
+        snapshots.append(warsaw_snapshot)
+        alternatives.append(warsaw_snapshot)
+
+    # ---------------------------------------------------------------
+    # Atomic persistence boundary
+    # ---------------------------------------------------------------
+    #
+    # Either every model snapshot generated by this orchestration is
+    # persisted, or none is.
+    try:
+        for snapshot in snapshots:
+            db.add(snapshot)
+
+        await db.commit()
+
+        for snapshot in snapshots:
+            await db.refresh(snapshot)
+
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist adaptive model calculations",
+        ) from exc
+
+    return AdaptiveMealModelsResponse(
+        primary=primary_snapshot,
+        alternatives=alternatives,
+    )

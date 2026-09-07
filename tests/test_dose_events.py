@@ -73,3 +73,22 @@ def test_response_schema_accepts_tracker_snapshot():
     )
     assert response.status == "planned"
     assert response.actual_units is None
+
+
+def test_confirm_schema_does_not_invent_delivery_method():
+    item = MealDoseEventConfirm(
+        actual_units=0.3,
+        actual_timestamp=datetime(2026, 9, 2, 11, 55),
+    )
+
+    assert item.delivery_method is None
+
+
+def test_adjust_schema_does_not_invent_delivery_method():
+    item = MealDoseEventAdjust(
+        actual_units=0.2,
+        actual_timestamp=datetime(2026, 9, 2, 11, 55),
+        adjustment_reason="Partial meal",
+    )
+
+    assert item.delivery_method is None

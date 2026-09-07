@@ -26,6 +26,7 @@ from app.api import (
     hormonal,
     carb_group_definitions,
     settings as settings_router,
+    clinical_models,
     time_of_day,
 )
 
@@ -87,7 +88,7 @@ app.include_router(hormonal.router)
 app.include_router(settings_router.router)
 app.include_router(time_of_day.router)
 app.include_router(absorption.router)
-
+app.include_router(clinical_models.router)
 
 
 # Root endpoint
