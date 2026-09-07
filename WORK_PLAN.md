@@ -1470,10 +1470,16 @@ The implementation order is now locked as:
         - full backend regression: 346 passed, 28 warnings
 
     Patient Expo model-result integration
-        - display Primary result
-        - display enabled alternatives side-by-side
-        - display explicit model provenance
-        - no patient model enable/disable controls
+        COMPLETE — 2026-09-07
+        - `/adaptive/models` is the patient-app adaptive calculation contract
+        - Primary is preserved and rendered as a distinct branch
+        - backend-authorized `alternatives[]` are rendered generically
+        - explicit `adaptive_model_version` provenance is displayed
+        - actual meal-state changes refresh the complete parallel model set
+        - patient Expo contains no clinical model enable/disable or selection controls
+        - Primary and alternative presentation is isolated behind `AdaptiveMealModels`
+        - focused and full frontend regression gates pass
+        - TypeScript type-check and `git diff --check` pass
 
     Meal Review / Update temporal workflow
         - architecture discussion remains required before implementation
