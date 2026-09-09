@@ -20,7 +20,8 @@ from sqlalchemy import (
 )
 
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy import DateTime
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
 from decimal import Decimal
 import uuid
@@ -408,6 +409,11 @@ class PatientCarbGroupSetting(Base):
 
 
 class Meal(Base):
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+
     """
     User-entered meal.
 

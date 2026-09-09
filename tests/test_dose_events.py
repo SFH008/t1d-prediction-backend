@@ -92,3 +92,29 @@ def test_adjust_schema_does_not_invent_delivery_method():
     )
 
     assert item.delivery_method is None
+
+
+def test_utc_naive_converts_aware_timestamp():
+    from datetime import datetime, timezone
+
+    from app.api.dose_events import _utc_naive
+
+    value = datetime(2026, 9, 8, 13, 38, 49, tzinfo=timezone.utc)
+
+    result = _utc_naive(value)
+
+    assert result == datetime(2026, 9, 8, 13, 38, 49)
+    assert result.tzinfo is None
+
+
+def test_utc_naive_preserves_naive_timestamp():
+    from datetime import datetime
+
+    from app.api.dose_events import _utc_naive
+
+    value = datetime(2026, 9, 8, 13, 38, 49)
+
+    result = _utc_naive(value)
+
+    assert result == value
+    assert result.tzinfo is None

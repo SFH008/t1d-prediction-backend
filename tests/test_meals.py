@@ -947,6 +947,8 @@ async def test_update_meal_consumption_derives_consumed_carbs():
     meal = SimpleNamespace(
         id=meal_id,
         patient_id=patient_id,
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
         meal_timestamp=datetime(2026, 9, 4, 12, 0),
         carb_groups=[meal_group],
     )
@@ -991,6 +993,10 @@ async def test_update_meal_consumption_derives_consumed_carbs():
             "app.api.meals.stage_patient_absorption_timeline",
             new=AsyncMock(),
         ),
+        patch(
+            "app.api.meals.complete_meal_recording_if_ready",
+            new=AsyncMock(return_value=False),
+        ) as complete_if_ready,
     ):
         updated = await update_meal_consumption(
             patient_id=patient_id,
@@ -1006,6 +1012,12 @@ async def test_update_meal_consumption_derives_consumed_carbs():
 
     assert group.consumed_quantity_grams == Decimal("30")
     assert group.consumed_carbs_grams == Decimal("1.8")
+
+    complete_if_ready.assert_awaited_once_with(
+        db=session,
+        patient_id=patient_id,
+        meal_id=meal_id,
+    )
 
     assert session.commit_called is True
     assert session.flush_count == 1
@@ -1030,6 +1042,8 @@ async def test_update_meal_consumption_rebuilds_timeline_before_commit():
     meal = SimpleNamespace(
         id=meal_id,
         patient_id=patient_id,
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
         meal_timestamp=datetime(2026, 9, 4, 12, 0),
         carb_groups=[meal_group],
     )
@@ -1076,6 +1090,10 @@ async def test_update_meal_consumption_rebuilds_timeline_before_commit():
             "app.api.meals.stage_patient_absorption_timeline",
             AsyncMock(),
         ) as stage_timeline,
+        patch(
+            "app.api.meals.complete_meal_recording_if_ready",
+            new=AsyncMock(return_value=False),
+        ) as complete_if_ready,
     ):
         await update_meal_consumption(
             patient_id=patient_id,
@@ -1096,6 +1114,12 @@ async def test_update_meal_consumption_rebuilds_timeline_before_commit():
         db=session,
         patient_id=patient_id,
         timeline=built_timeline,
+    )
+
+    complete_if_ready.assert_awaited_once_with(
+        db=session,
+        patient_id=patient_id,
+        meal_id=meal_id,
     )
 
     assert session.commit_called is True
@@ -1120,6 +1144,8 @@ async def test_update_meal_consumption_rejects_more_than_planned():
     meal = SimpleNamespace(
         id=meal_id,
         patient_id=patient_id,
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
         carb_groups=[meal_group],
     )
 
@@ -1196,6 +1222,8 @@ async def test_update_meal_consumption_is_atomic_across_components():
     meal = SimpleNamespace(
         id=meal_id,
         patient_id=patient_id,
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
         carb_groups=[fruit, bolognese],
     )
 
@@ -1273,7 +1301,8 @@ async def test_update_meal_consumption_rejects_group_not_in_meal():
         meal_timestamp=datetime.now(),
         meal_category="Lunch",
         total_carbs_grams=Decimal("40.0"),
-        status="captured",
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
     )
 
     fruit = MealCarbGroup(
@@ -1330,7 +1359,8 @@ async def test_update_meal_consumption_persists_zero_consumption():
         meal_timestamp=datetime.now(),
         meal_category="Lunch",
         total_carbs_grams=Decimal("40.0"),
-        status="captured",
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
     )
 
     fruit = MealCarbGroup(
@@ -1396,6 +1426,8 @@ async def test_update_meal_consumption_rolls_back_when_timeline_rebuild_fails():
     meal = SimpleNamespace(
         id=meal_id,
         patient_id=patient_id,
+        status="active",
+        started_at=datetime(2026, 9, 8, 12, 5),
         meal_timestamp=datetime(2026, 9, 4, 12, 0),
         carb_groups=[meal_group],
     )

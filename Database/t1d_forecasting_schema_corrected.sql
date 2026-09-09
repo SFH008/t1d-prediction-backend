@@ -142,7 +142,7 @@
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
         CONSTRAINT chk_meal_status
-            CHECK (status IN ('captured')),
+            CHECK (status IN ('captured', 'active', 'completed')),
 
         CONSTRAINT chk_meal_total_carbs
             CHECK (total_carbs_grams >= 0)

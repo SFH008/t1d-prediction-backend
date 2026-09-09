@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -89,23 +89,33 @@ async def test_record_administered_dose_preserves_unknown_delivery_method():
         rollback=AsyncMock(),
     )
 
-    await _record_administered_dose(
-        event=dose_event,
-        actual_units=Decimal("0.300"),
-        actual_timestamp=datetime(
-            2026,
-            9,
-            2,
-            11,
-            55,
-        ),
-        delivery_method=None,
-        notes=None,
-        status="given",
-        adjustment_reason=None,
-        db=db,
-    )
+    with patch(
+        "app.api.dose_events.complete_meal_recording_if_ready",
+        new=AsyncMock(return_value=False),
+    ) as complete_if_ready:
+        await _record_administered_dose(
+            event=dose_event,
+            actual_units=Decimal("0.300"),
+            actual_timestamp=datetime(
+                2026,
+                9,
+                2,
+                11,
+                55,
+            ),
+            delivery_method=None,
+            notes=None,
+            status="given",
+            adjustment_reason=None,
+            db=db,
+        )
 
     insulin_event = db.add.call_args.args[0]
+
+    complete_if_ready.assert_awaited_once_with(
+        db=db,
+        patient_id=dose_event.patient_id,
+        meal_id=dose_event.meal_id,
+    )
 
     assert insulin_event.delivery_method is None

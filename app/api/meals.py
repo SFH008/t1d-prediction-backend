@@ -15,7 +15,7 @@ from uuid import UUID
 
 from unittest.mock import AsyncMock, patch
 
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -41,6 +41,12 @@ from app.schema.schemas import (
 from app.services.absorption_timeline import (
     build_patient_absorption_timeline,
     stage_patient_absorption_timeline,
+)
+
+from app.services.meal_lifecycle import (
+    MealLifecycleError,
+    complete_meal_recording_if_ready,
+    start_meal,
 )
 
 
@@ -375,6 +381,12 @@ async def update_meal_consumption(
             detail=f"Meal {meal_id} not found",
         )
 
+    if meal.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail="Actual consumption can only be recorded for an active meal",
+        )
+
     groups_by_number = {
         group.group_number: group
         for group in meal.carb_groups
@@ -452,6 +464,12 @@ async def update_meal_consumption(
             timeline=timeline,
         )
 
+        await complete_meal_recording_if_ready(
+            db=db,
+            patient_id=patient_id,
+            meal_id=meal_id,
+        )
+
         await db.commit()
 
     except HTTPException:
@@ -495,3 +513,118 @@ async def get_meals(
 
     result = await db.execute(stmt)
     return result.scalars().all()
+
+@router.post(
+    "/patients/{patient_id}/meals/{meal_id}/start",
+    response_model=MealResponse,
+)
+async def start_patient_meal(
+    patient_id: UUID,
+    meal_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Start a captured meal.
+
+    A patient may have at most one active meal. The transition is persisted
+    by the backend; meal_timestamp remains the planning/capture timestamp and
+    started_at records the actual lifecycle start.
+    """
+
+    meal_result = await db.execute(
+        select(Meal)
+        .options(selectinload(Meal.carb_groups))
+        .where(
+            Meal.id == meal_id,
+            Meal.patient_id == patient_id,
+        )
+    )
+    meal = meal_result.scalar_one_or_none()
+
+    if meal is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Meal not found",
+        )
+
+    active_result = await db.execute(
+        select(Meal.id)
+        .where(
+            Meal.patient_id == patient_id,
+            Meal.status == "active",
+            Meal.id != meal_id,
+        )
+        .limit(1)
+    )
+
+    if active_result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Patient already has an active meal",
+        )
+
+    try:
+        start_meal(
+            meal,
+            started_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+    except MealLifecycleError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    try:
+        await db.commit()
+        await db.refresh(meal)
+
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Patient already has an active meal",
+        ) from exc
+
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to start meal",
+        ) from exc
+
+    return meal
+
+
+@router.get(
+    "/patients/{patient_id}/meals/active",
+    response_model=MealResponse,
+)
+async def get_active_patient_meal(
+    patient_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return the patient's currently active meal.
+
+    Active-meal state is backend-owned durable state and must not be inferred
+    by the client from navigation or local component state.
+    """
+
+    result = await db.execute(
+        select(Meal)
+        .options(selectinload(Meal.carb_groups))
+        .where(
+            Meal.patient_id == patient_id,
+            Meal.status == "active",
+        )
+    )
+    meal = result.scalar_one_or_none()
+
+    if meal is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No active meal found",
+        )
+
+    return meal
+

@@ -266,7 +266,7 @@ class MealConsumptionGroupUpdate(BaseModel):
 
 
 class MealConsumptionUpdate(BaseModel):
-    """Record actual consumption for a captured meal."""
+    """Record actual consumption for an active meal."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -415,6 +415,7 @@ class MealResponse(BaseModel):
     meal_timestamp: datetime
     meal_category: str
     status: str
+    started_at: Optional[datetime] = None
     total_carbs_grams: float
     fat_grams: float
     protein_grams: float
