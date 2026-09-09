@@ -382,7 +382,7 @@ Implemented and verified:
 
 ### B2.3 architecture amendment — parallel clinical model isolation
 
-Status: LOCKED / CORRECTION REQUIRED BEFORE B2.4b
+Status: LOCKED / CORRECTION COMPLETE
 
 The project supports independent evaluation of multiple clinical calculation
 models against the same immutable meal and therapy-context facts.
@@ -468,7 +468,7 @@ be silently reinterpreted.
 
 ### Temporal meal workflow — Plan and Follow-up
 
-Status: LOCKED / FRONTEND RESTRUCTURE REQUIRED BEFORE B2.4b
+Status: LOCKED / FRONTEND RESTRUCTURE COMPLETE
 
 Meal planning and meal follow-up are separate temporal workflows.
 
@@ -1433,9 +1433,11 @@ Implementation verification — 2026-09-07:
 
 ---
 
-## Current implementation focus — 2026-09-07
+## Current implementation focus — 2026-09-09
 
-The implementation order is now locked as:
+The architecture-correction and Meal Flow checkpoint is complete.
+
+Completed baseline:
 
     B2.4a.1 Primary adaptive isolation
         COMPLETE
@@ -1444,8 +1446,7 @@ The implementation order is now locked as:
         COMPLETE
 
     Adaptive persistence / provenance isolation
-        CORE COMPLETE
-        live migration verification still required
+        COMPLETE
 
     A1.6 Model administration vertical slice
         COMPLETE
@@ -1453,7 +1454,8 @@ The implementation order is now locked as:
         - `/admin/clinical-models` management API implemented
         - separate React/TypeScript/Vite back-office application implemented
         - browser Warsaw ON/OFF persistence verified
-        - final safe state restored: Primary ON, Warsaw OFF
+        - Primary and alternative administration remain separate from
+          the patient application
 
     B2.4a.3 Parallel model exposure
         COMPLETE
@@ -1462,32 +1464,88 @@ The implementation order is now locked as:
         - Warsaw executes/exposes only when enabled
         - generic `alternatives[]` response contract
         - one authoritative factual-state load
-        - independent Primary/Warsaw service calculations
+        - independent Primary/Warsaw calculations
         - one persistence transaction
-        - disabled Warsaw does not require Warsaw snapshots
-        - enabled Warsaw rejects missing immutable Warsaw snapshots
-        - persistence failure rolls back all model snapshots atomically
-        - full backend regression: 346 passed, 28 warnings
+        - model provenance remains isolated
 
     Patient Expo model-result integration
-        COMPLETE — 2026-09-07
+        COMPLETE
         - `/adaptive/models` is the patient-app adaptive calculation contract
-        - Primary is preserved and rendered as a distinct branch
-        - backend-authorized `alternatives[]` are rendered generically
-        - explicit `adaptive_model_version` provenance is displayed
-        - actual meal-state changes refresh the complete parallel model set
-        - patient Expo contains no clinical model enable/disable or selection controls
-        - Primary and alternative presentation is isolated behind `AdaptiveMealModels`
-        - focused and full frontend regression gates pass
-        - TypeScript type-check and `git diff --check` pass
+        - Primary and backend-authorized alternatives are presented independently
+        - patient Expo contains no clinical model administration controls
 
-    Meal Review / Update temporal workflow
-        - architecture discussion remains required before implementation
-        - preferred entry point is associated with the Meal workflow,
-          not automatically through History
+    Temporal Meal Flow
+        COMPLETE
+        - immutable captured Meal Plan
+        - explicit Meal started transition
+        - backend-authoritative active meal
+        - actual component consumption recording
+        - actual dose-event given / adjusted / skipped recording
+        - automatic completion when all consumption is known and all planned
+          dose events are terminal
+        - Recording complete confirmation prevents repeated submission
+        - completed meal remains available to Adaptive Meal Accounting
+        - Home refresh removes stale active-meal presentation
+        - Return Home permits capture of the next meal
+        - meal completion means recording/workflow completion, not
+          physiological inactivity
 
-    B2.4b.0 Insulin Model & IOB Architecture Audit
-        BLOCKED until carbohydrate-model work above is complete
+    Tablet patient frontend foundation
+        COMPLETE FOR CURRENT UX
+        - phone layout preserved
+        - tablet portrait responsive composition
+        - tablet landscape/wide responsive composition
+        - responsive carb-group column counts
+        - shared Expo application, API contracts and meal-domain logic
+        - further visual refinement is deferred until justified by runtime UX
+
+Parked non-blocking validation:
+
+    Warsaw v1 non-zero fat/protein runtime validation
+        PARKED pending patient clarification
+        - current zero-value runtime observations are consistent with meals
+          containing zero fat/protein and disabled/zero-scaling Warsaw settings
+        - no clinical configuration will be invented merely to force a
+          non-zero validation result
+        - this validation no longer blocks B2.4b
+        - Primary/Warsaw model isolation remains a hard invariant
+
+Current phase:
+
+    B2.4b — Accumulated active state
+        CURRENT / UNBLOCKED
+
+    B2.4b.0 — Insulin Model & IOB Architecture Audit
+        CURRENT
+
+B2.4b must establish deterministic accumulated physiological state at an
+evaluation time from all relevant historical actual events:
+
+    actual insulin events
+        -> insulin on board (IOB)
+
+    actual consumed carbohydrate + component absorption curves
+        -> carbohydrate on board (COB)
+
+    eligible delayed nutrient/model activity
+        -> separately model-provenanced delayed activity
+
+Historical effects overlap and accumulate. The latest meal or latest insulin
+event alone is never sufficient.
+
+B2.4b produces physiological/accounting state, not an insulin recommendation.
+
+The accumulated-state implementation must be:
+
+- deterministic;
+- independently testable;
+- versioned;
+- reproducible for an explicit evaluation timestamp;
+- based on actual historical events rather than planned insulin;
+- capable of accumulating overlapping meals and insulin events;
+- model-provenanced where model-derived state is involved;
+- strictly isolated between Primary and Warsaw alternative-model branches;
+- suitable as deterministic input to later TensorFlow/Keras forecasting.
 
 The Expo Settings function remains part of the patient application, but is
 limited to patient-facing application preferences such as theme, appearance,
