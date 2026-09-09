@@ -37,6 +37,7 @@ class PatientUpdate(BaseModel):
 class PatientResponse(PatientBase):
     """Schema for patient response."""
     id: UUID
+    patient_reference: str
     external_patient_id: str
 
     # Pump / CGM device information
@@ -72,6 +73,11 @@ class GlucoseReadingBase(BaseModel):
     timestamp: datetime
     reading_type: str = "cgm"
     source: str = "app"
+    glucose_value_mmol_l: Optional[float] = None
+    device_name: Optional[str] = None
+    is_calibration: Optional[bool] = False
+    notes: Optional[str] = None
+    source_event_id: Optional[str] = None
 
 
 class GlucoseReadingCreate(GlucoseReadingBase):
@@ -113,11 +119,55 @@ class GlucoseStats(BaseModel):
 # ============================================================================
 
 class InsulinEventBase(BaseModel):
-    """Base insulin event schema."""
+    """Base factual insulin-delivery event schema."""
+
+    # Backward-compatible broad classification.
     insulin_type: str
+
+    # Canonical actual delivered insulin.
     dose_units: float = Field(..., ge=0, le=100)
+
+    # Physiological delivery timestamp.
     timestamp: datetime
     delivery_method: str = "pump"
+
+    # Original insulin_events baseline fields.
+    bolus_component_rapid: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+    )
+    bolus_component_extended: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+    )
+    basal_rate: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+    device_name: Optional[str] = None
+    is_manual_entry: Optional[bool] = False
+    notes: Optional[str] = None
+
+    # Independent normalized semantics.
+    delivery_class: Optional[str] = None
+    administration_mode: Optional[str] = None
+    purpose: Optional[str] = None
+
+    # Source-native provenance.
+    source_event_type: Optional[str] = None
+    source_activation_type: Optional[str] = None
+    source_event_id: Optional[str] = None
+    source_device_id: Optional[str] = None
+
+    # Source-reported intended delivery and completion state.
+    programmed_units: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+    )
+    delivery_completed: Optional[bool] = None
 
 
 class InsulinEventCreate(InsulinEventBase):
@@ -810,6 +860,64 @@ class ClinicalModelSettingResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ============================================================================
+# Patient Deterministic Model Administration Schemas
+# ============================================================================
+
+class DeterministicModelIdentitySchema(BaseModel):
+    model_key: str
+    model_version: str
+
+
+class PatientDeterministicModelSettingUpdate(BaseModel):
+    """
+    Full administrative patient-specific deterministic configuration.
+
+    This endpoint is not a patient preference endpoint.
+    """
+
+    cob_model_key: str
+    cob_model_version: str
+
+    iob_model_key: Optional[str] = None
+    iob_model_version: Optional[str] = None
+
+    insulin_accounting_policy: str
+    active_insulin_time_minutes: Optional[int] = Field(
+        None,
+        gt=0,
+    )
+
+    patient_cob_model_selectable: bool = False
+    patient_iob_model_selectable: bool = False
+
+    allowed_cob_models: Optional[
+        List[DeterministicModelIdentitySchema]
+    ] = None
+    allowed_iob_models: Optional[
+        List[DeterministicModelIdentitySchema]
+    ] = None
+
+    cob_parameters: Optional[dict] = None
+    iob_parameters: Optional[dict] = None
+
+    config_version: str = "v1"
+    is_active: bool = True
+
+
+class PatientDeterministicModelSettingResponse(
+    PatientDeterministicModelSettingUpdate
+):
+    id: UUID
+    patient_id: UUID
+    config_source: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 
 # ============================================================================
 # Time-of-Day Profile Schemas

@@ -19,6 +19,16 @@ from app.models import (
 from app.schema.schemas import DataImportResponse, ImportStatusResponse
 from decimal import Decimal
 
+from app.services.medtronic_glucose import (
+    MEDTRONIC_GLUCOSE_SOURCE,
+    normalize_medtronic_glucose_reading,
+)
+
+from app.services.medtronic_insulin import (
+    MEDTRONIC_INSULIN_SOURCE,
+    normalize_medtronic_insulin_marker,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/import", tags=["Import"])
@@ -145,93 +155,172 @@ async def import_medtronic_export(
         await db.commit()
         await db.refresh(import_log)
 
-        # Process glucose readings
+        # Process factual CGM observations.
+        #
+        # Medtronic snapshots overlap. The pure normalizer derives a
+        # deterministic source_event_id from source-native observation
+        # facts so repeated snapshots resolve to the same reading.
         glucose_count = 0
         sensor_glucose_data = patient_data.get("sgs", [])
 
         for entry in sensor_glucose_data:
-            if entry.get("kind") != "SG":
-                continue
-
             try:
-                sg_value = entry.get("sg")
-                timestamp = entry.get("timestamp")
+                normalized = (
+                    normalize_medtronic_glucose_reading(
+                        entry,
+                        source_device_id=device_serial,
+                        device_name=device_model,
+                    )
+                )
 
-                if not sg_value or not timestamp:
+                if normalized is None:
                     continue
 
-                # Validate
-                if not (40 <= float(sg_value) <= 400):
-                    logger.warning(f"Invalid glucose {sg_value}")
-                    continue
+                existing_stmt = select(
+                    GlucoseReading.id
+                ).where(
+                    GlucoseReading.patient_id
+                    == patient.id,
+                    GlucoseReading.source
+                    == MEDTRONIC_GLUCOSE_SOURCE,
+                    GlucoseReading.source_event_id
+                    == normalized.source_event_id,
+                )
 
-                # Classify
-                is_hypo = float(sg_value) < 70
-                is_severe_hypo = float(sg_value) < 54
-                is_hyper = float(sg_value) > 180
-                is_severe_hyper = float(sg_value) > 250
+                existing_result = await db.execute(
+                    existing_stmt
+                )
+
+                if (
+                    existing_result.scalar_one_or_none()
+                    is not None
+                ):
+                    continue
 
                 reading = GlucoseReading(
                     patient_id=patient.id,
-                    glucose_value_mg_dl=Decimal(str(sg_value)),
-                    timestamp=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
-                    reading_type="cgm",
-                    source="medtronic_export",
-                    is_valid=True,
-                    is_hypo=is_hypo,
-                    is_severe_hypo=is_severe_hypo,
-                    is_hyper=is_hyper,
-                    is_severe_hyper=is_severe_hyper,
+                    glucose_value_mg_dl=(
+                        normalized.glucose_value_mg_dl
+                    ),
+                    timestamp=normalized.timestamp,
+                    reading_type=normalized.reading_type,
+                    source=normalized.source,
+                    device_name=normalized.device_name,
+                    source_event_id=(
+                        normalized.source_event_id
+                    ),
+                    is_valid=normalized.is_valid,
+                    is_hypo=normalized.is_hypo,
+                    is_severe_hypo=(
+                        normalized.is_severe_hypo
+                    ),
+                    is_hyper=normalized.is_hyper,
+                    is_severe_hyper=(
+                        normalized.is_severe_hyper
+                    ),
                 )
+
                 db.add(reading)
                 glucose_count += 1
 
             except Exception as e:
-                logger.error(f"Error processing glucose entry: {e}")
+                logger.error(
+                    f"Error processing glucose entry: {e}"
+                )
                 continue
 
-        # Process insulin events
+        # Process factual delivered-insulin events.
+        #
+        # Medtronic API snapshots overlap in time. The pure normalizer
+        # derives a deterministic source_event_id from source-native facts,
+        # allowing repeated snapshots to resolve to the same physiological
+        # insulin event.
         insulin_count = 0
         markers = patient_data.get("markers", [])
-        insulin_type_map = {
-            "MANUAL_BOLUS_DELIVERY": "bolus",
-            "AUTO_BASAL_DELIVERY": "basal",
-            "REWIND": "rewind",
-            "FILL": "fill",
-            "SUSPEND": "suspend"
-        }
 
         for marker in markers:
-            marker_type = marker.get("type")
-            if marker_type not in insulin_type_map:
-                continue
-
             try:
-                timestamp = marker.get("timestamp")
-                data_values = marker.get("data", {}).get("dataValues", {})
+                normalized = (
+                    normalize_medtronic_insulin_marker(
+                        marker,
+                        source_device_id=device_serial,
+                        device_name=device_model,
+                    )
+                )
 
-                if not timestamp:
+                if normalized is None:
                     continue
 
-                dose = data_values.get("bolusAmount", 0)
+                existing_stmt = select(
+                    InsulinEvent.id
+                ).where(
+                    InsulinEvent.patient_id
+                    == patient.id,
+                    InsulinEvent.source
+                    == MEDTRONIC_INSULIN_SOURCE,
+                    InsulinEvent.source_event_id
+                    == normalized.source_event_id,
+                )
 
-                if not (0 <= float(dose) <= 100):
-                    logger.warning(f"Invalid insulin amount {dose}")
+                existing_result = await db.execute(
+                    existing_stmt
+                )
+
+                if (
+                    existing_result.scalar_one_or_none()
+                    is not None
+                ):
                     continue
 
                 event = InsulinEvent(
                     patient_id=patient.id,
-                    insulin_type=insulin_type_map[marker_type],
-                    dose_units=Decimal(str(dose)),
-                    timestamp=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
-                    delivery_method="pump",
-                    source="medtronic_export"
+                    insulin_type=normalized.insulin_type,
+                    dose_units=normalized.dose_units,
+                    timestamp=normalized.timestamp,
+                    delivery_method=(
+                        normalized.delivery_method
+                    ),
+                    source=normalized.source,
+                    basal_rate=normalized.basal_rate,
+                    device_name=normalized.device_name,
+                    is_manual_entry=(
+                        normalized.is_manual_entry
+                    ),
+                    delivery_class=(
+                        normalized.delivery_class
+                    ),
+                    administration_mode=(
+                        normalized.administration_mode
+                    ),
+                    purpose=normalized.purpose,
+                    source_event_type=(
+                        normalized.source_event_type
+                    ),
+                    source_activation_type=(
+                        normalized.source_activation_type
+                    ),
+                    source_event_id=(
+                        normalized.source_event_id
+                    ),
+                    source_device_id=(
+                        normalized.source_device_id
+                    ),
+                    programmed_units=(
+                        normalized.programmed_units
+                    ),
+                    delivery_completed=(
+                        normalized.delivery_completed
+                    ),
                 )
+
                 db.add(event)
                 insulin_count += 1
 
             except Exception as e:
-                logger.error(f"Error processing insulin event: {e}")
+                logger.error(
+                    "Error processing insulin event: %s",
+                    e,
+                )
                 continue
 
         # Process therapy limits

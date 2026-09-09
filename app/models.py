@@ -44,6 +44,15 @@ class Patient(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
+    # Stable human-facing patient reference.
+    # Database-generated; UUID remains the canonical internal key.
+    patient_reference = Column(
+        String(20),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
     # Stable external identifier.
     # For Medtronic imports this is the device serial number.
     external_patient_id = Column(
@@ -187,7 +196,17 @@ class GlucoseReading(Base):
     glucose_value_mg_dl = Column(Numeric(6, 2), nullable=False)
     timestamp = Column(DateTime, nullable=False, index=True)
     reading_type = Column(String(50))  # 'cgm', 'meter', etc.
-    source = Column(String(100))  # 'medtronic_export', etc.
+    source = Column(String(100))  # factual source
+
+    # Original glucose_readings fields from the corrected SQL baseline.
+    glucose_value_mmol_l = Column(Numeric(6, 2))
+    device_name = Column(String(100))
+    is_calibration = Column(Boolean, default=False)
+    notes = Column(Text)
+
+    # Stable source-native identity for overlapping/repeated imports.
+    source_event_id = Column(String(255))
+
     is_valid = Column(Boolean, default=True)
 
     # Auto-classified thresholds
@@ -216,12 +235,54 @@ class InsulinEvent(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
-    insulin_type = Column(String(50), nullable=False)  # 'basal', 'bolus', 'rewind', etc.
+    # Backward-compatible broad insulin classification.
+    # New deterministic code must prefer the independent normalized
+    # dimensions below rather than overloading insulin_type.
+    insulin_type = Column(String(50), nullable=False)
+
+    # Canonical ACTUAL delivered insulin amount. Planned or recommended
+    # insulin that was not delivered must never be persisted here as dose.
     dose_units = Column(Numeric(8, 3), nullable=False)
+
+    # Physiological event timestamp, not backend ingestion time.
     timestamp = Column(DateTime, nullable=False, index=True)
+
     delivery_method = Column(String(50))  # 'pump', 'pen', 'manual'
     source = Column(String(100))  # 'medtronic_export', etc.
 
+    # Original insulin_events factual fields from the corrected SQL baseline.
+    # These columns pre-date the deterministic IOB work and already exist in
+    # PostgreSQL; keeping them mapped prevents the ORM from hiding valid facts.
+    bolus_component_rapid = Column(Numeric(8, 2))
+    bolus_component_extended = Column(Numeric(8, 2))
+    basal_rate = Column(Numeric(8, 4))
+    device_name = Column(String(100))
+    is_manual_entry = Column(Boolean, default=False)
+    notes = Column(Text)
+
+    # Independent normalized insulin-event semantics.
+    delivery_class = Column(String(30))  # basal | bolus | other
+    administration_mode = Column(
+        String(30)
+    )  # automated | recommended | manual | imported | unknown
+    purpose = Column(
+        String(30)
+    )  # meal | correction | basal | combined | unknown
+
+    # Source-native provenance. These fields deliberately preserve
+    # Medtronic semantics instead of prematurely translating everything
+    # into one insulin_type value.
+    source_event_type = Column(String(100))
+    source_activation_type = Column(String(100))
+    source_event_id = Column(String(255))
+    source_device_id = Column(String(255))
+
+    # Source-reported delivery facts.
+    # dose_units remains the normalized actual delivered amount.
+    programmed_units = Column(Numeric(8, 3))
+    delivery_completed = Column(Boolean)
+
+    # Backend persistence / ingestion timestamp.
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -1394,6 +1455,132 @@ class PatientAbsorptionForecast(Base):
     )
 
     patient = relationship("Patient")
+
+class PatientDeterministicModelSetting(Base):
+    """
+    Admin-managed patient-specific deterministic model configuration.
+
+    Global model availability belongs elsewhere. This row selects and
+    parameterizes deterministic models for one patient.
+    """
+
+    __tablename__ = "patient_deterministic_model_settings"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    patient_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    cob_model_key = Column(
+        String(100),
+        nullable=False,
+        default="deterministic_linear",
+    )
+
+    cob_model_version = Column(
+        String(100),
+        nullable=False,
+        default="deterministic_linear_v1",
+    )
+
+    iob_model_key = Column(String(100))
+    iob_model_version = Column(String(100))
+
+    insulin_accounting_policy = Column(
+        String(30),
+        nullable=False,
+        default="total",
+    )
+
+    active_insulin_time_minutes = Column(Integer)
+
+    patient_cob_model_selectable = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    patient_iob_model_selectable = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    allowed_cob_models = Column(JSON)
+    allowed_iob_models = Column(JSON)
+
+    cob_parameters = Column(JSON)
+    iob_parameters = Column(JSON)
+
+    config_source = Column(
+        String(50),
+        nullable=False,
+        default="admin",
+    )
+
+    config_version = Column(
+        String(100),
+        nullable=False,
+        default="v1",
+    )
+
+    is_active = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    patient = relationship("Patient")
+
+    __table_args__ = (
+        CheckConstraint(
+            "insulin_accounting_policy IN "
+            "('total', 'correction_only', 'separated')",
+            name=(
+                "ck_patient_deterministic_"
+                "insulin_accounting_policy"
+            ),
+        ),
+        CheckConstraint(
+            "active_insulin_time_minutes IS NULL "
+            "OR active_insulin_time_minutes > 0",
+            name=(
+                "ck_patient_deterministic_"
+                "active_insulin_time_positive"
+            ),
+        ),
+        CheckConstraint(
+            "(iob_model_key IS NULL) = "
+            "(iob_model_version IS NULL)",
+            name=(
+                "ck_patient_deterministic_"
+                "iob_identity_complete"
+            ),
+        ),
+    )
+
 
 class ClinicalModelSetting(Base):
     """

@@ -5,8 +5,24 @@
     -- ============================================================================
     -- 1. PATIENTS (UPDATED: Device status cache)
     -- ============================================================================
+    CREATE SEQUENCE patient_reference_seq
+        START WITH 1
+        INCREMENT BY 1
+        NO MINVALUE
+        NO MAXVALUE
+        CACHE 1;
+
     CREATE TABLE patients (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        patient_reference VARCHAR(20) UNIQUE NOT NULL
+            DEFAULT (
+                'T1D-' ||
+                LPAD(
+                    nextval('patient_reference_seq')::text,
+                    6,
+                    '0'
+                )
+            ),
         external_patient_id VARCHAR(255) UNIQUE NOT NULL,
         first_name VARCHAR(100) NOT NULL,
         last_name VARCHAR(100) NOT NULL,
@@ -35,6 +51,7 @@
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         is_active BOOLEAN DEFAULT TRUE
     );
+    CREATE INDEX idx_patients_patient_reference ON patients(patient_reference);
     CREATE INDEX idx_patients_external_id ON patients(external_patient_id);
     CREATE INDEX idx_patients_is_active ON patients(is_active);
     CREATE INDEX idx_patients_pump_status ON patients(pump_status);
@@ -61,11 +78,20 @@
         is_hyper BOOLEAN DEFAULT FALSE, -- TRUE if > 180 mg/dL
         is_severe_hyper BOOLEAN DEFAULT FALSE, -- TRUE if > 250 mg/dL
         trend_arrow VARCHAR(10), -- '↑' | '↗' | '→' | '↘' | '↓'
-        notes TEXT
+        notes TEXT,
+        -- Stable identity for overlapping/repeated source snapshots.
+        source_event_id VARCHAR(255)
     );
     CREATE INDEX idx_glucose_patient_time ON glucose_readings(patient_id, timestamp DESC);
     CREATE INDEX idx_glucose_timestamp ON glucose_readings(timestamp DESC);
     CREATE INDEX idx_glucose_source ON glucose_readings(source);
+    CREATE UNIQUE INDEX uq_glucose_patient_source_event
+        ON glucose_readings (
+            patient_id,
+            source,
+            source_event_id
+        )
+        WHERE source_event_id IS NOT NULL;
     -- ADDED: Conditional indexes for fast alert lookups
     CREATE INDEX idx_glucose_patient_hypo ON glucose_readings(patient_id, timestamp DESC) WHERE is_hypo = TRUE;
     CREATE INDEX idx_glucose_patient_severe_hypo ON glucose_readings(patient_id, timestamp DESC) WHERE is_severe_hypo = TRUE;
@@ -83,17 +109,73 @@
         delivery_method VARCHAR(50),
         bolus_component_rapid DECIMAL(8, 2),
         bolus_component_extended DECIMAL(8, 2),
-        basal_rate DECIMAL(8, 2),
+        basal_rate DECIMAL(8, 4),
         timestamp TIMESTAMP NOT NULL,
         recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         source VARCHAR(50),
         device_name VARCHAR(100),
         is_manual_entry BOOLEAN DEFAULT FALSE,
-        notes TEXT
+        notes TEXT,
+
+        -- Deterministic factual-ledger normalization.
+        -- Added by migration 019 for existing installations.
+        delivery_class VARCHAR(30),
+        administration_mode VARCHAR(30),
+        purpose VARCHAR(30),
+        source_event_type VARCHAR(100),
+        source_activation_type VARCHAR(100),
+        source_event_id VARCHAR(255),
+        source_device_id VARCHAR(255),
+        programmed_units DECIMAL(8, 3),
+        delivery_completed BOOLEAN,
+
+        CONSTRAINT chk_insulin_delivery_class
+            CHECK (
+                delivery_class IS NULL
+                OR delivery_class IN ('basal', 'bolus', 'other')
+            ),
+
+        CONSTRAINT chk_insulin_administration_mode
+            CHECK (
+                administration_mode IS NULL
+                OR administration_mode IN (
+                    'automated',
+                    'recommended',
+                    'manual',
+                    'imported',
+                    'unknown'
+                )
+            ),
+
+        CONSTRAINT chk_insulin_purpose
+            CHECK (
+                purpose IS NULL
+                OR purpose IN (
+                    'meal',
+                    'correction',
+                    'basal',
+                    'combined',
+                    'unknown'
+                )
+            ),
+
+        CONSTRAINT chk_insulin_programmed_units_nonnegative
+            CHECK (
+                programmed_units IS NULL
+                OR programmed_units >= 0
+            )
     );
     CREATE INDEX idx_insulin_patient_time ON insulin_events(patient_id, timestamp DESC);
     CREATE INDEX idx_insulin_timestamp ON insulin_events(timestamp DESC);
     CREATE INDEX idx_insulin_type ON insulin_events(insulin_type);
+CREATE UNIQUE INDEX
+    uq_insulin_events_patient_source_event
+ON insulin_events (
+    patient_id,
+    source,
+    source_event_id
+)
+WHERE source_event_id IS NOT NULL;
 
     -- ============================================================================
     -- 4. CARB_INTAKES
@@ -435,6 +517,84 @@ CREATE INDEX idx_meal_calculations_patient
     -- ============================================================================
     -- 12. MODEL_TRAINING_LOGS (UPDATED: R², safety metrics, validation gate)
     -- ============================================================================
+    -- ============================================================================
+    -- PATIENT DETERMINISTIC MODEL SETTINGS
+    -- Admin-managed patient-specific deterministic configuration
+    -- ============================================================================
+
+    CREATE TABLE patient_deterministic_model_settings (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        patient_id UUID NOT NULL UNIQUE
+            REFERENCES patients(id) ON DELETE CASCADE,
+
+        cob_model_key VARCHAR(100) NOT NULL
+            DEFAULT 'deterministic_linear',
+
+        cob_model_version VARCHAR(100) NOT NULL
+            DEFAULT 'deterministic_linear_v1',
+
+        iob_model_key VARCHAR(100),
+        iob_model_version VARCHAR(100),
+
+        insulin_accounting_policy VARCHAR(30) NOT NULL
+            DEFAULT 'total',
+
+        active_insulin_time_minutes INTEGER,
+
+        patient_cob_model_selectable BOOLEAN NOT NULL
+            DEFAULT FALSE,
+
+        patient_iob_model_selectable BOOLEAN NOT NULL
+            DEFAULT FALSE,
+
+        allowed_cob_models JSONB,
+        allowed_iob_models JSONB,
+
+        cob_parameters JSONB,
+        iob_parameters JSONB,
+
+        config_source VARCHAR(50) NOT NULL
+            DEFAULT 'admin',
+
+        config_version VARCHAR(100) NOT NULL
+            DEFAULT 'v1',
+
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+
+        created_at TIMESTAMP NOT NULL
+            DEFAULT CURRENT_TIMESTAMP,
+
+        updated_at TIMESTAMP NOT NULL
+            DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT ck_patient_deterministic_insulin_accounting_policy
+            CHECK (
+                insulin_accounting_policy IN (
+                    'total',
+                    'correction_only',
+                    'separated'
+                )
+            ),
+
+        CONSTRAINT ck_patient_deterministic_active_insulin_time_positive
+            CHECK (
+                active_insulin_time_minutes IS NULL
+                OR active_insulin_time_minutes > 0
+            ),
+
+        CONSTRAINT ck_patient_deterministic_iob_identity_complete
+            CHECK (
+                (iob_model_key IS NULL)
+                =
+                (iob_model_version IS NULL)
+            )
+    );
+
+    CREATE INDEX idx_patient_deterministic_model_patient
+    ON patient_deterministic_model_settings(patient_id);
+
+
     CREATE TABLE model_training_logs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         model_version VARCHAR(100) NOT NULL UNIQUE,

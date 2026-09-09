@@ -27,6 +27,7 @@ from app.api import (
     carb_group_definitions,
     settings as settings_router,
     clinical_models,
+    admin_deterministic_models,
     time_of_day,
 )
 
@@ -89,6 +90,7 @@ app.include_router(settings_router.router)
 app.include_router(time_of_day.router)
 app.include_router(absorption.router)
 app.include_router(clinical_models.router)
+app.include_router(admin_deterministic_models.router)
 
 
 # Root endpoint
